@@ -25,10 +25,38 @@ from shapely.geometry import box
 from numpy.lib.stride_tricks import sliding_window_view
 from shapely.ops import transform
 from constants import CHUNK_MARGIN_METERS
+from constants import CROP_TYPES
+from constants import CZECH_BUILDING_LABELS
+from constants import DEFAULT_TRAFFIC_BY_CLASS
+from constants import DRIVABLE_CLASSES
 from constants import TERRAIN_FLOOR_ELEVATION
+from constants import FLAT_CLASSES
+from constants import FLAT_ROOF_PALETTE
 from constants import HALF_SQUARE_SIDE
+from constants import LAND_COVER_MAP
+from constants import LAND_USE_MAP
+from constants import LAND_USE_TREE_SPACING
+from constants import LINEAR_CLASS_MAP
 from constants import MAP_CHUNKS
+from constants import MAX_BRIDGE_GRADE
+from constants import MIN_BRIDGE_LEN
+from constants import MIN_TUNNEL_LEN
+from constants import NO_TREE_LAND_USES
+from constants import PANEL_WALL_PALETTE
+from constants import PEDESTRIAN_CLASSES
+from constants import PITCHED_CLASSES
+from constants import PITCHED_ROOF_PALETTE
 from constants import REFERENCE_ELEVATION
+from constants import ROAD_HIERARCHY
+from constants import ROAD_SURFACE_MAP
+from constants import ROAD_WIDTHS
+from constants import ROOF_SHAPE_MAP
+from constants import SEASON_PALETTES
+from constants import SIDEWALK_ROADS
+from constants import STANDARD_WALL_PALETTE
+from constants import SURFACE_IDS
+from constants import TENEMENT_ROOF_PALETTE
+from constants import TENEMENT_WALL_PALETTE
 
 import geo
 
@@ -204,6 +232,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     extended_area = map_clip_area.intersection(box(-extended_half, -extended_half, extended_half, extended_half))
     extended_area_prep = shapely.prepared.prep(extended_area)
 
+    # SECTION: Set Up Asset Paths
     satellite_data_path_name = 'asset/satelit.json'
     manual_overrides_path_name = 'assets/upresneni.json'
     strechy_orto_path_name = 'assets/strechy_orto.json'
@@ -278,6 +307,8 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             local_scope = locals()
             exec(custom_hook_code, globals(), local_scope)
 
+
+
     # ---------------- Terrain Grid ----------------
     print("Terrain Grid")
     dem_sampler = build_dem_sampler(data_dir)
@@ -315,17 +346,11 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     print('terén', grid_nodes, 'x', grid_nodes, 'převýšení', round(float(core_heights.max()), 1), 'm')
 
+
+
+
     # ---------------- Surface Class Rasterization ----------------
     print("Surface Class Rasterization")
-    SURFACE_IDS = dict(
-        grass=0, garden=1, park=2, meadow=3, forest=4, scrub=5, pitch=6, track=7, sand=8, paved=9,
-        industrial=10, parking=11, road=12, marking=13, curb=14, dirt=15, water=16, pool=17, stream=18,
-        rail=19, cemetery=20, wetland=21, rock=22, construction=23, footway=24, pool_edge=25, farmland=26,
-        cobble=27, grave=28, manhole=29, court_blue=30, zone=31, zone2=32, piste=33, skijump=34,
-        wheat=35, wheat2=36, rape=37, rape2=38, maize=39, maize2=40, soil=41, soil2=42,
-        plaza=43, plaza2=44, deck=45,
-    )
-
     core_tex_width = int(2 * HALF_SQUARE_SIDE / tex_meters_per_px)
     ext_tex_width = core_tex_width + 2 * margin_px
 
@@ -371,20 +396,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Land Use & Vegetation Masks ----------------
     print("Land Use & Vegetation Masks")
-    LAND_USE_MAP = {
-        'residential': 'garden', 'garden': 'garden', 'grass': 'park', 'park': 'park', 'village_green': 'park',
-        'recreation_ground': 'park', 'meadow': 'meadow', 'farmland': 'farmland', 'allotments': 'garden',
-        'cemetery': 'cemetery', 'pitch': 'pitch', 'track': 'track', 'playground': 'sand', 'stadium': 'pitch',
-        'school': 'paved', 'kindergarten': 'garden', 'industrial': 'industrial', 'garages': 'industrial',
-        'commercial': 'paved', 'retail': 'paved', 'pedestrian': 'cobble', 'plaza': 'cobble',
-        'construction': 'construction', 'railway': 'dirt', 'barracks': 'industrial',
-        'downhill': 'piste', 'ski_jump': 'skijump',
-    }
-    NO_TREE_LAND_USES = {
-        'pitch', 'track', 'playground', 'stadium', 'school', 'industrial', 'garages', 'commercial',
-        'retail', 'pedestrian', 'plaza', 'construction', 'railway', 'downhill', 'ski_jump',
-    }
-
     green_mask_data = None
     if os.path.exists('build/zelen_maska.png'):
         green_arr = np.asarray(Image.open('build/zelen_maska.png')) > 0
@@ -496,10 +507,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Natural Land Cover & Ski Pistes ----------------
     print("Natural Land Cover & Ski Pistes")
-    LAND_COVER_MAP = {
-        'forest': 'forest', 'wood': 'forest', 'scrub': 'scrub', 'shrub': 'scrub',
-        'grassland': 'meadow', 'wetland': 'wetland', 'bare_rock': 'rock', 'rock': 'rock',
-    }
     for _, row in land_cover_df.iterrows():
         if row['class'] in LAND_COVER_MAP and row.geom.geom_type != 'Point':
             paint_polygon(row.geom, SURFACE_IDS[LAND_COVER_MAP[row['class']]])
@@ -554,7 +561,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     for meadow_poly in meadow_polys:
         paint_polygon(meadow_poly, SURFACE_IDS['meadow'])
 
-    CROP_TYPES = ['wheat'] * 4 + ['rape'] * 2 + ['maize'] * 2 + ['soil'] * 2
     for field_poly in arable_polys:
         obb = field_poly.minimum_rotated_rectangle
         corners = list(obb.exterior.coords)[:4]
@@ -635,7 +641,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         return any('is_under_construction' in list(flag.get('values')) for flag in row.road_flags)
 
     segments_df = segments_df[[not is_under_construction(row) for _, row in segments_df.iterrows()]].reset_index(drop=True)
-    MIN_TUNNEL_LEN = 60.0
 
     def get_segment_flags(row):
         flags = row.get('rail_flags') if row.subtype == 'rail' else row.road_flags
@@ -677,7 +682,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                         tunnel_portals.append((pt0.x, pt0.y, math.atan2(pt1.y - pt0.y, pt1.x - pt0.x)))
     segments_df = pd.DataFrame(surface_segments).reset_index(drop=True)
 
-    MIN_BRIDGE_LEN = manual_overrides.get('bridge_min', 8.0)
+    min_bridge_len = manual_overrides.get('bridge_min', MIN_BRIDGE_LEN)
 
     def split_bridge_intervals(row):
         flags = get_segment_flags(row)
@@ -705,7 +710,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             if end_f - start_f < 1e-6:
                 continue
             sub_geom = shapely.ops.substring(row.geom, start_f, end_f, normalized=True)
-            if is_bridge and sub_geom.length >= MIN_BRIDGE_LEN:
+            if is_bridge and sub_geom.length >= min_bridge_len:
                 bridge_segments.append((sub_geom, row))
                 raw_bridge_records.append((sub_geom, row))
                 continue
@@ -713,13 +718,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             sub_row['geom'] = sub_geom
             ground_segments.append(sub_row)
     segments_df = pd.DataFrame(ground_segments).reset_index(drop=True)
-
-    ROAD_WIDTHS = {
-        'motorway': 18, 'trunk': 12, 'primary': 10, 'secondary': 9, 'tertiary': 8,
-        'residential': 6, 'unclassified': 6, 'living_street': 5, 'service': 3.6,
-        'pedestrian': 4, 'track': 3, 'footway': 1.8, 'path': 1.6, 'cycleway': 2,
-        'steps': 2, 'bridleway': 1.6, 'unknown': 3,
-    }
 
     def get_road_width(row):
         width = ROAD_WIDTHS.get(row['class'], 3)
@@ -739,17 +737,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             )
         )
         return round(width * 0.6, 1) if is_oneway else width
-
-    ROAD_SURFACE_MAP = {
-        'track': 'dirt', 'path': 'dirt', 'bridleway': 'dirt', 'footway': 'footway',
-        'cycleway': 'footway', 'steps': 'paved', 'pedestrian': 'cobble',
-    }
-    DRIVABLE_CLASSES = {
-        'motorway', 'trunk', 'primary', 'secondary', 'tertiary',
-        'residential', 'unclassified', 'living_street', 'service',
-    }
-    PEDESTRIAN_CLASSES = {'footway', 'path', 'cycleway', 'steps', 'pedestrian', 'bridleway', 'track'}
-    MAX_BRIDGE_GRADE = {'road': 0.06, 'rail': 0.03, 'foot': 0.08}
 
     road_entries = []
     for _, row in segments_df.iterrows():
@@ -857,6 +844,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             deck_width = 4.5 if kind == 'rail' else get_road_width(row)
             bridge_coords = [c[:2] for c in line.coords]
 
+            # TODO: surely this is already implemented elsewhere
             def unit_vec(pt_a, pt_b):
                 dist = math.dist(pt_a, pt_b) or 1.0
                 return ((pt_a[0] - pt_b[0]) / dist, (pt_a[1] - pt_b[1]) / dist)
@@ -977,7 +965,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Sidewalks & Road Surface Painting ----------------
     print("Sidewalks & Road Surface Painting")
-    SIDEWALK_ROADS = {'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'unclassified'}
     footpath_tree = shapely.STRtree([
         sub_l
         for _, geom, r_cls, _, _ in road_entries
@@ -1037,10 +1024,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         if r_cls in DRIVABLE_CLASSES
         for sub_l in extract_linestrings(geom)
     ]
-    ROAD_HIERARCHY = {
-        'service': 0, 'living_street': 1, 'residential': 2, 'unclassified': 2,
-        'tertiary': 3, 'secondary': 4, 'primary': 5, 'trunk': 6, 'motorway': 7,
-    }
     endpoint_ranks = {}
     for line, _, r_cls, _ in drivable_lines:
         for endpoint in (line.coords[0], line.coords[-1]):
@@ -1307,50 +1290,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             })
         buildings_df = pd.concat([buildings_df, pd.DataFrame(extra_rows)], ignore_index=True)
 
-    STANDARD_WALL_PALETTE = [
-        (232, 220, 192), (241, 234, 216), (217, 201, 163), (230, 211, 179),
-        (214, 208, 196), (239, 230, 207), (216, 185, 143), (226, 196, 160), (205, 214, 206),
-    ]
-    PANEL_WALL_PALETTE = [
-        (232, 226, 208), (213, 217, 222), (236, 236, 230), (222, 224, 222),
-        (226, 199, 154), (169, 195, 201), (238, 232, 218), (204, 210, 214),
-    ]
-    PITCHED_ROOF_PALETTE = [
-        (168, 68, 47), (150, 60, 44), (142, 58, 42), (107, 59, 47),
-        (74, 74, 82), (63, 74, 90), (156, 90, 60), (128, 52, 40),
-    ]
-    FLAT_ROOF_PALETTE = [(141, 141, 141), (122, 122, 122), (156, 154, 146), (110, 112, 116)]
-    TENEMENT_WALL_PALETTE = [
-        (232, 206, 150), (226, 186, 160), (206, 214, 180), (236, 226, 200), (214, 196, 170),
-        (204, 202, 196), (238, 214, 170), (220, 176, 146), (196, 208, 214), (230, 220, 210),
-    ]
-    TENEMENT_ROOF_PALETTE = [(70, 72, 80), (96, 64, 52), (150, 62, 44), (60, 64, 72), (128, 60, 46), (84, 88, 96)]
-
-    PITCHED_CLASSES = {
-        'church', 'house', 'detached', 'semidetached_house', 'residential', 'terrace', 'farm', 'chapel',
-        'bungalow', 'villa', 'cabin', 'religious', 'civic', 'hut', 'barn', 'farm_auxiliary',
-        'kindergarten', 'allotment_house',
-    }
-    FLAT_CLASSES = {
-        'garage', 'garages', 'apartments', 'industrial', 'warehouse', 'commercial', 'retail', 'school',
-        'university', 'hospital', 'office', 'carport', 'parking', 'service', 'transportation',
-        'sports_hall', 'sports_centre', 'greenhouse', 'roof',
-    }
-    ROOF_SHAPE_MAP = {
-        'gabled': 'gabled', 'hipped': 'hipped', 'half_hipped': 'hipped', 'pyramidal': 'pyramidal',
-        'saltbox': 'gabled', 'gambrel': 'gabled', 'skillion': 'gabled', 'mansard': 'hipped',
-        'flat': 'flat', 'round': 'flat', 'dome': 'pyramidal',
-    }
-    CZECH_BUILDING_LABELS = {
-        'house': 'rodinný dům', 'detached': 'rodinný dům', 'residential': 'obytný dům', 'apartments': 'bytový dům',
-        'garage': 'garáž', 'garages': 'garáže', 'industrial': 'průmyslová budova', 'warehouse': 'sklad',
-        'civic': 'občanská stavba', 'school': 'škola', 'university': 'univerzita', 'retail': 'obchod',
-        'commercial': 'komerční budova', 'church': 'kostel', 'chapel': 'kaple', 'kindergarten': 'mateřská škola',
-        'shed': 'kůlna', 'barn': 'stodola', 'service': 'technická budova', 'office': 'kanceláře',
-        'semidetached_house': 'dvojdům', 'terrace': 'řadový dům', 'bungalow': 'bungalov', 'hotel': 'hotel',
-        'dormitory': 'kolej', 'hospital': 'zdravotnictví', 'greenhouse': 'skleník', 'roof': 'přístřešek',
-        'cabin': 'chata', 'farm': 'usedlost', 'farm_auxiliary': 'hospodářská budova', 'transportation': 'stavba pro dopravu',
-    }
 
     def parse_color_rgb(color_str, fallback_rgb):
         if not isinstance(color_str, str):
@@ -2373,11 +2312,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # Linear Features (Fences, Hedges, Walls, Powerlines, Ski Lifts)
     linear_features = {'fence': [], 'hedge': [], 'wall': [], 'power': [], 'lift': []}
-    LINEAR_CLASS_MAP = {
-        'fence': 'fence', 'hedge': 'hedge', 'wall': 'wall', 'retaining_wall': 'wall',
-        'power_line': 'power', 'minor_line': 'power',
-        'chair_lift': 'lift', 'drag_lift': 'lift', 't-bar': 'lift', 'platter': 'lift', 'cable_car': 'lift', 'gondola': 'lift',
-    }
     for _, row in infra_df.iterrows():
         target_key = LINEAR_CLASS_MAP.get(row['class'])
         if not target_key:
@@ -2472,10 +2406,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                         raw_trees.append((pt.x, pt.y, 8 + hash_to_unit_float('r' + r_key) * 6, 0, 0))
                     cursor += 7
 
-    LAND_USE_TREE_SPACING = {
-        'park': 11, 'cemetery': 9, 'residential': 16, 'garden': 12, 'grass': 20,
-        'village_green': 18, 'recreation_ground': 20, 'allotments': 14, 'kindergarten': 14,
-    }
     for _, row in land_use_df.iterrows():
         spacing = LAND_USE_TREE_SPACING.get(row['class']) or (LAND_USE_TREE_SPACING['park'] if row.id in green_plaza_ids else None)
         if spacing:
@@ -2638,57 +2568,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Seasonal Ground Texture Generation ----------------
     print("Seasonal Ground Texture Generation")
-    SEASON_PALETTES = {
-        'summer': {
-            'grass': (106, 160, 74), 'garden': (118, 168, 80), 'park': (104, 164, 72), 'meadow': (140, 172, 86),
-            'forest': (66, 112, 56), 'scrub': (92, 128, 62), 'pitch': (80, 156, 72), 'track': (178, 92, 72),
-            'sand': (214, 192, 138), 'paved': (196, 186, 160), 'industrial': (156, 152, 142), 'parking': (120, 120, 124),
-            'road': (92, 92, 98), 'marking': (236, 232, 214), 'curb': (176, 172, 162), 'dirt': (170, 146, 102),
-            'water': (64, 124, 190), 'pool': (92, 196, 230), 'stream': (72, 132, 196), 'rail': (88, 84, 82),
-            'cemetery': (88, 132, 70), 'wetland': (100, 146, 92), 'rock': (150, 146, 136), 'construction': (164, 132, 96),
-            'footway': (214, 206, 186), 'pool_edge': (236, 240, 240), 'farmland': (168, 172, 96), 'cobble': (200, 188, 164),
-            'grave': (156, 152, 144), 'manhole': (66, 66, 70), 'court_blue': (70, 112, 170), 'zone': (255, 0, 220),
-            'zone2': (0, 230, 230), 'piste': (150, 178, 92), 'skijump': (98, 160, 150),
-            'wheat': (214, 186, 106), 'wheat2': (194, 162, 86), 'rape': (150, 148, 82), 'rape2': (128, 126, 70),
-            'maize': (80, 134, 58), 'maize2': (58, 106, 44), 'soil': (110, 142, 66), 'soil2': (128, 104, 70),
-            'plaza': (186, 186, 184), 'plaza2': (206, 206, 200), 'deck': (146, 104, 88),
-        },
-    }
-    spring_pal = dict(SEASON_PALETTES['summer'])
-    spring_pal.update({
-        'grass': (122, 176, 80), 'garden': (132, 184, 86), 'park': (118, 180, 78), 'meadow': (150, 188, 90),
-        'forest': (78, 128, 62), 'farmland': (132, 150, 90),
-        'wheat': (104, 146, 72), 'wheat2': (88, 128, 62), 'rape': (238, 214, 60), 'rape2': (216, 194, 50),
-        'maize': (138, 106, 74), 'maize2': (112, 86, 60), 'soil': (130, 98, 68), 'soil2': (106, 80, 56),
-    })
-    SEASON_PALETTES['spring'] = spring_pal
-
-    autumn_pal = dict(SEASON_PALETTES['summer'])
-    autumn_pal.update({
-        'grass': (122, 154, 72), 'garden': (128, 158, 76), 'park': (120, 156, 70), 'meadow': (156, 160, 88),
-        'forest': (92, 104, 58), 'scrub': (124, 116, 64), 'farmland': (176, 150, 96), 'cemetery': (104, 128, 70),
-        'wheat': (204, 182, 126), 'wheat2': (164, 132, 88), 'rape': (112, 150, 74), 'rape2': (98, 134, 64),
-        'maize': (152, 126, 86), 'maize2': (124, 98, 66), 'soil': (122, 92, 62), 'soil2': (98, 72, 50),
-    })
-    SEASON_PALETTES['autumn'] = autumn_pal
-
-    winter_pal = dict(SEASON_PALETTES['summer'])
-    snow_rgb = (234, 239, 246)
-    winter_pal.update({
-        k: snow_rgb for k in (
-            'grass', 'garden', 'park', 'meadow', 'pitch', 'sand', 'cemetery', 'farmland',
-            'construction', 'wetland', 'track', 'rock', 'piste', 'skijump', 'wheat', 'rape', 'maize', 'soil',
-        )
-    })
-    winter_pal.update({k: (212, 218, 228) for k in ('wheat2', 'rape2', 'maize2', 'soil2')})
-    winter_pal.update({
-        'forest': (214, 222, 232), 'scrub': (220, 226, 234), 'paved': (222, 226, 232), 'industrial': (206, 210, 216),
-        'parking': (176, 180, 188), 'road': (104, 106, 114), 'marking': (190, 192, 196), 'curb': (226, 230, 236),
-        'dirt': (214, 214, 218), 'water': (186, 210, 228), 'pool': (150, 168, 184), 'stream': (58, 96, 136),
-        'footway': (226, 230, 236), 'cobble': (206, 210, 218), 'pool_edge': (230, 234, 238), 'grave': (222, 226, 232),
-        'manhole': (90, 92, 98), 'plaza': (208, 212, 220), 'plaza2': (222, 226, 232), 'deck': (176, 160, 160),
-    })
-    SEASON_PALETTES['winter'] = winter_pal
+    
 
     if getattr(geo, 'SAT_OUTLINE', False):
         for is_fine, zone_id in ((False, SURFACE_IDS['zone2']), (True, SURFACE_IDS['zone'])):
@@ -2701,13 +2581,13 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     noise_primary = np.random.default_rng(1).random((core_tex_width, core_tex_width), dtype=np.float32)
     noise_secondary = np.random.default_rng(2).random((core_tex_width, core_tex_width), dtype=np.float32)
 
-    NATURAL_SURFACE_IDS = [
+    natural_surface_ids = [
         SURFACE_IDS[k] for k in (
             'grass', 'garden', 'park', 'meadow', 'forest', 'scrub', 'cemetery', 'wetland',
             'farmland', 'wheat', 'wheat2', 'rape', 'rape2', 'maize', 'maize2', 'soil', 'soil2',
         )
     ]
-    is_natural_mask = np.isin(core_surface_grid, NATURAL_SURFACE_IDS)
+    is_natural_mask = np.isin(core_surface_grid, natural_surface_ids)
 
     for season_name, palette in SEASON_PALETTES.items():
         color_lut = np.zeros((256, 3), np.uint8)
@@ -2875,11 +2755,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 traffic_volumes.setdefault(count_rec['sil'], []).append((count_rec['sv'], count_rec['nak']))
         truck_shares = {k: round(100 * sum(n for _, n in v) / max(1, sum(s for s, _ in v)), 1) for k, v in traffic_volumes.items()}
         traffic_volumes = {k: float(np.median([s for s, _ in v])) for k, v in traffic_volumes.items()}
-
-    DEFAULT_TRAFFIC_BY_CLASS = {
-        'trunk': 10000, 'primary': 8000, 'secondary': 3000, 'tertiary': 1500,
-        'unclassified': 400, 'residential': 300, 'living_street': 100,
-    }
 
     def get_segment_traffic(row):
         routes = row.get('routes')
