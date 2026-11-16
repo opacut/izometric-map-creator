@@ -1,8 +1,14 @@
 # komíny, chladicí věže, vysílače, nádrže a nadzemní potrubí z OpenStreetMap (Overpass, ODbL, bez registrace)
 # assets/kominy.json: [{"lat", "lon", "h", "k": "komin" | "vez" | "stozar" | "nadrz" | "rozhledna", "r": poloměr paty nebo null}]
 # assets/potrubi.json: [[[lat, lon], ...]]; spouštět z kořene repa: python nastroje/kominy.py
-import json, math, subprocess, sys; sys.path.insert(0, '.')
+import json
+import math
+import subprocess
+import sys
+# TODO: pretty sure this is redundant
+sys.path.insert(0, '.')
 import geo
+from constants import CHUNK_MARGIN_METERS
 
 SHODA_M = 15          # stejný komín bývá v OSM jako bod i jako plocha
 VYCHOZI_H = {'komin': 25.0, 'vez': 40.0, 'stozar': 30.0, 'nadrz': 10.0, 'rozhledna': 13.0}
@@ -57,8 +63,8 @@ def potrubi(prvky):
 
 
 if __name__ == '__main__':
-    x0, y0, x1, y1 = geo.extent(geo.MARGIN + 20)
-    lo0, la0 = geo.to_lonlat(x0, y0); lo1, la1 = geo.to_lonlat(x1, y1); b = f'{la0},{lo0},{la1},{lo1}'
+    x0, y0, x1, y1 = geo.get_map_extent_local_meters(CHUNK_MARGIN_METERS + 20)
+    lo0, la0 = geo.convert_local_meters_to_lonlat(x0, y0); lo1, la1 = geo.convert_local_meters_to_lonlat(x1, y1); b = f'{la0},{lo0},{la1},{lo1}'
     def dotaz(q):
         t = subprocess.run(['curl', '-s', '-f', '-m', '120', '-A', 'izomapa-tools/1.0', '--data-urlencode', f'data={q}', 'https://overpass-api.de/api/interpreter'],
                            check=True, capture_output=True, text=True).stdout

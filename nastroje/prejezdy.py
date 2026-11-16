@@ -1,7 +1,14 @@
 # železniční přejezdy z OpenStreetMap (Overpass, ODbL, bez registrace) -> assets/prejezdy.json: [[lat, lon], ...]
 # auta před nimi čekají, když jede vlak (prep.py je přiřadí kusům silnic, web/app.html je zavírá podle jízdních řádů)
 # spouštět z kořene repa: python nastroje/prejezdy.py
-import json, math, subprocess, sys; sys.path.insert(0, '.')
+import json
+import math
+import subprocess
+import sys
+# TODO: I truly don't know why this next line
+sys.path.insert(0, '.')
+import geo
+from constants import CHUNK_MARGIN_METERS
 
 DOSAH_M = 6
 
@@ -24,9 +31,8 @@ def na_kusu(p, body):
 
 
 if __name__ == '__main__':
-    import geo
-    x0, y0, x1, y1 = geo.extent(geo.MARGIN + 20)
-    lo0, la0 = geo.to_lonlat(x0, y0); lo1, la1 = geo.to_lonlat(x1, y1); b = f'{la0},{lo0},{la1},{lo1}'
+    x0, y0, x1, y1 = geo.get_map_extent_local_meters(CHUNK_MARGIN_METERS + 20)
+    lo0, la0 = geo.convert_local_meters_to_lonlat(x0, y0); lo1, la1 = geo.convert_local_meters_to_lonlat(x1, y1); b = f'{la0},{lo0},{la1},{lo1}'
     q = f'[out:json][timeout:60];node["railway"="level_crossing"]({b});out;'
     t = subprocess.run(['curl', '-s', '-f', '-m', '120', '-A', 'izomapa-tools/1.0', '--data-urlencode', f'data={q}', 'https://overpass-api.de/api/interpreter'],
                        check=True, capture_output=True, text=True).stdout

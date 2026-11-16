@@ -2,11 +2,16 @@
 
 python preview.py   po přerenderování a dzi.py, před ./deploy.sh
 """
-import json, os, subprocess, sys
+import json
+import os
+import subprocess
+import sys
 from PIL import Image
 
+# TODO: maybe handle this better
 os.makedirs('site/preview', exist_ok=True)
 from concurrent.futures import ThreadPoolExecutor
+
 VARIANTS = ['spring', 'summer', 'autumn', 'winter']
 # skládání čtyř období běží souběžně (každé je samostatný proces)
 with ThreadPoolExecutor(4) as ex:

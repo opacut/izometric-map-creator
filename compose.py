@@ -1,12 +1,17 @@
 """Náhled složené mapy z dlaždic rendereru (build/.../tiles_<varianta>) – kontrola švů bez DZI a webu.
 
 python compose.py [varianta] [měřítko] [výstup.png] [i,j ...]   např. python compose.py autumn 8 build/nahled.png
-(měřítko = kolikrát zmenšit oproti 0,2 m/px, platí stejně pro základní i detailní rozlišení)
 Čtverce se skládají od nejvzdálenějšího (pohled od JZ: větší i + j = dál), stejně jako v prohlížeči.
 """
-import json, os, sys
+import json
+import os
+import sys
 from PIL import Image
-from geo import CHUNKS, chunk_dir
+from constants import MAP_CHUNKS
+
+
+def chunk_dir(c):
+    return 'build' if tuple(c) == (0, 0) else f'build/c{c[0]}_{c[1]}'
 
 Image.MAX_IMAGE_PIXELS = None
 variant = sys.argv[1] if len(sys.argv) > 1 else 'autumn'
@@ -19,11 +24,10 @@ def src(c):
     return f'build/tiles_{variant}' if tuple(c) == (0, 0) else f'{chunk_dir(c)}/tiles_{variant}'
 
 
-chunks = [c for c in CHUNKS if os.path.exists(f'{src(c)}/info.json') and (not only or c in only)]
+chunks = [c for c in MAP_CHUNKS if os.path.exists(f'{src(c)}/info.json') and (not only or c in only)]
 chunks.sort(key=lambda c: -(c[0] + c[1]))
 infos = {c: json.load(open(f'{src(c)}/info.json')) for c in chunks}
 mpp = infos[chunks[0]]['mpp']
-scale *= max(1, round(0.2 / mpp))      # měřítko je vůči 0,2 m/px: u detailního rozlišení (0,1) stejně velký náhled
 gx0 = min(i['x0'] for i in infos.values()); gy1 = max(i['y1'] for i in infos.values())
 W = max(round((i['x0'] - gx0) / mpp) + i['width'] for i in infos.values())
 H = max(round((gy1 - i['y1']) / mpp) + i['height'] for i in infos.values())

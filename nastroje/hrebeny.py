@@ -1,9 +1,15 @@
 # směr hřebene šikmých střech z laseru DMP 1G: v trojúhelníkové střeše výška závisí na vzdálenosti od hřebene, ne na poloze podél něj
 # -> assets/hrebeny.json (id budovy -> 'L' hřeben podél delší strany, 'S' podél kratší); spouštět po dmp_fetch.py z kořene repa
-import glob, json, sys
+import glob
+import json
+import sys
 from multiprocessing import Pool
-import numpy as np, laspy, shapely, pyarrow.parquet as pq
+import numpy as np
+import laspy
+import shapely
+import pyarrow.parquet as pq
 from pyproj import Transformer
+
 T = Transformer.from_crs(4326, 5514, always_xy=True)
 B = {}
 for f in sorted(glob.glob('data*/building.parquet')):

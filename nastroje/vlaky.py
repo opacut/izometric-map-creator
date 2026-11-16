@@ -1,13 +1,28 @@
 # Vlaky podle celostátního jízdního řádu -> build/vlaky/vlaky_mhd.json, přidá je mhd.py k tramvajím a autobusům.
 # Vstup: build/vlaky/vlaky.json (nastroje/vlaky_vyber.py), koleje z data_all/segment.parquet, polohy stanic z Overture.
 # Trasa jde po kolejích mezi stanicemi na mapě; na okraj mapy se dopočítá směrem ke stanici za okrajem. Čas mezi stanicemi je rovnoměrný.
-import datetime, hashlib, json, math, os, re, sys, difflib, collections
+import datetime
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import difflib
+import collections
 sys.path.insert(0, '.')
-import numpy as np, shapely, pyarrow.parquet as pq, pyarrow.dataset as ds, pyarrow.fs as fs
+import numpy as np
+import shapely
+import pyarrow.parquet as pq
+import pyarrow.dataset as ds
+import pyarrow.fs as fs
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
-from geo import to_local, bbox_lonlat, extent
+import geo
+#from geo import to_local 
+#from geo import bbox_lonlat
+#from geo import extent
 
 DRUH = {'50': 'EC', '63': 'IC', '69': 'Ex', '70': 'EN', '84': 'Os', '94': 'SC', '122': 'Sp', '157': 'R', '209': 'rj', '9000': 'Rx', '9001': 'TLX', '9002': 'TL', '9003': 'LE', '9004': 'RJ'}
 VOZU = {'Os': 2, 'Sp': 2, 'R': 5, 'Rx': 6, 'Ex': 7, 'EC': 7, 'IC': 7, 'SC': 7, 'EN': 8, 'rj': 7, 'LE': 5, 'RJ': 6, 'TL': 2, 'TLX': 2}
@@ -16,9 +31,9 @@ BARVA = {'1154': '#2a5ba8', '3616': '#1e1e22', '3246': '#f2c21a', '1156': '#b530
 # ---- stanice v širším okolí ----
 STANICE = 'build/vlaky/stanice.json'
 if not os.path.exists(STANICE):
-    X0, X1, Y0, Y1 = bbox_lonlat(0)
-    from nastroje import overture
-    d = overture.dataset('base', 'infrastructure')
+    X0, X1, Y0, Y1 = geo.get_map_bounding_box_lonlat(0)
+    s3 = fs.S3FileSystem(anonymous=True, region='us-west-2')
+    d = ds.dataset('overturemaps-us-west-2/release/2026-10-21.0/theme=base/type=infrastructure/', filesystem=s3, format='parquet')
     f = (ds.field('bbox', 'xmin') < X1 + 0.5) & (ds.field('bbox', 'xmax') > X0 - 0.5) & (ds.field('bbox', 'ymin') < Y1 + 0.35) & (ds.field('bbox', 'ymax') > Y0 - 0.35)
     t = d.to_table(filter=f, columns=['names', 'class', 'bbox']).to_pylist()
     st = {}
@@ -40,7 +55,7 @@ KLIC = {norm(k).lower(): k for k in ST}
 def poloha(n, nezname=collections.Counter()):
     k = KLIC.get(norm(n).lower())
     if k is None: return None
-    x, y = to_local(*ST[k])
+    x, y = geo.convert_lonlat_to_local_meters(*ST[k])
     return float(x), float(y)
 
 
@@ -53,7 +68,7 @@ def nid(p):
     return ids[k]
 for r in rows:
     if r['subtype'] != 'rail' or r['class'] not in ('standard_gauge', 'unknown'): continue
-    g = shapely.transform(shapely.from_wkb(r['geometry']), lambda c: np.column_stack(to_local(c[:, 0], c[:, 1])))
+    g = shapely.transform(shapely.from_wkb(r['geometry']), lambda c: np.column_stack(geo.convert_lonlat_to_local_meters(c[:, 0], c[:, 1])))
     c = shapely.get_coordinates(shapely.segmentize(g, 10.0))
     for a, b in zip(c[:-1], c[1:]):
         ia, ib = nid((float(a[0]), float(a[1]))), nid((float(b[0]), float(b[1])))
@@ -65,7 +80,7 @@ for a, b in T.query_pairs(5.0):
 G = csr_matrix((W, (I, J)), shape=(len(XY), len(XY)))
 stupen = np.bincount(np.array(I), minlength=len(XY))
 xs, ys = XY[:, 0], XY[:, 1]
-x0, y0, x1, y1 = extent(0.0)
+x0, y0, x1, y1 = geo.get_map_extent_local_meters(0.0)
 OKRAJ = np.where((stupen <= 2) & ((xs < x0 - 200) | (xs > x1 + 200) | (ys < y0 - 200) | (ys > y1 + 200)))[0]
 print('uzlů kolejí', len(XY), 'konců na okraji', len(OKRAJ))
 CACHE = {}

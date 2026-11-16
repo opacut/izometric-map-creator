@@ -1,6 +1,8 @@
 """Přepne stav všech čtverců (hotovo / rozpracováno) v site/tiles.json a site/overlay.json bez přerenderování.
 python set_status.py hotovo"""
-import json, sys
+import json 
+import sys
+
 st = sys.argv[1] if len(sys.argv) > 1 else 'hotovo'
 t = json.load(open('site/tiles.json'))
 t.setdefault('base', {})['status'] = st

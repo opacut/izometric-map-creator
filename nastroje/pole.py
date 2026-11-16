@@ -1,14 +1,20 @@
 # pole podle ortofota: travní porost ze ZABAGED, který je na ortofotu žlutohnědý (obilí, posečené seno), je ve skutečnosti pole
 # -> assets/zabaged.json klíč 'pole' (indexy do 'ttp'); spouštět po nastroje/zabaged.py a nastroje/les.py (build/orto_cele.jpg)
-import sys, json; sys.path.insert(0, '.')
-import numpy as np, geo
-from PIL import Image, ImageDraw
+import sys
+import json
+# TODO: nope, delete
+sys.path.insert(0, '.')
+import numpy as np
+import geo
+from PIL import Image
+from PIL import ImageDraw
+
 Image.MAX_IMAGE_PIXELS = None
 A = np.asarray(Image.open('build/orto_cele.jpg').convert('RGB')).astype(np.int16)
 Z = json.load(open('assets/zabaged.json')); X0, Y1, M = json.load(open('build/les_maska.json'))['x0y1m']
 pole = []
 for i, p in enumerate(Z['ttp']):
-    x, y = geo.to_local(np.array([q[1] for q in p[0]]), np.array([q[0] for q in p[0]]))
+    x, y = geo.convert_lonlat_to_local_meters(np.array([q[1] for q in p[0]]), np.array([q[0] for q in p[0]]))
     u, v = (x - X0) / M, (Y1 - y) / M
     if u.min() < 0 or v.min() < 0 or u.max() >= A.shape[1] or v.max() >= A.shape[0]: continue
     x0, y0, x1, y1 = int(u.min()), int(v.min()), int(u.max()) + 1, int(v.max()) + 1

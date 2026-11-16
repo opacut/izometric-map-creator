@@ -1,19 +1,27 @@
 # les podle ortofota ČÚZK: stáhne letecké snímky celé mapy po 2 m/px a z nich masku korun stromů
 # -> build/orto/ (dlaždice), build/orto_cele.jpg, build/les_maska.png + .json (prep.py: kde není koruna, je louka a žádné stromy)
 # spouštět z kořene repa: python nastroje/les.py   (stahuje se jednou, ~1 min na čtverec)
-import sys, os, json, subprocess; sys.path.insert(0, '.')
-import numpy as np, geo
+import sys
+import os
+import json
+import subprocess
+# TODO: nope
+sys.path.insert(0, '.')
+import numpy as np
+import geo
 from PIL import Image
+from constants import CHUNK_MARGIN_METERS
+
 Image.MAX_IMAGE_PIXELS = None
 D = 'build/orto/'; os.makedirs(D, exist_ok=True)
 M = 2.0
-X0, Y0, X1, Y1 = geo.extent(geo.MARGIN + 20)
+X0, Y0, X1, Y1 = geo.get_map_extent_local_meters(CHUNK_MARGIN_METERS + 20)
 W, H = int((X1 - X0) / M), int((Y1 - Y0) / M); T = 1500
 big = Image.new('RGB', (W, H))
 for ty in range(0, H, T):
     for tx in range(0, W, T):
         w, h = min(T, W - tx), min(T, H - ty)
-        lo0, la1 = geo.to_lonlat(X0 + tx * M, Y1 - ty * M); lo1, la0 = geo.to_lonlat(X0 + (tx + w) * M, Y1 - (ty + h) * M)
+        lo0, la1 = geo.convert_local_meters_to_lonlat(X0 + tx * M, Y1 - ty * M); lo1, la0 = geo.convert_local_meters_to_lonlat(X0 + (tx + w) * M, Y1 - (ty + h) * M)
         f = f'{D}{tx}_{ty}.jpg'
         if not os.path.exists(f):
             subprocess.run(['curl', '-s', '-m', '120', '-o', f, 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer?SERVICE=WMS&VERSION=1.3.0'

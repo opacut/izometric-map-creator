@@ -1,11 +1,16 @@
 # výřez z dlaždic renderu kolem bodu: python nastroje/vyrez.py TILEDIR lat lon w h out.png [výška terénu]   (out = - vypíše potřebné dlaždice)
-import sys, json, os; sys.path.insert(0, '.')
+import sys
+import json
+import os
+# TODO: wtf is this
+sys.path.insert(0, '.')
 from PIL import Image
 import geo
+
 d, lat, lon, w, h, out = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), sys.argv[6]
 info = json.load(open(os.path.join(d, 'info.json'))); I = geo.Image2D(info); T = info['tile']
-x, y = geo.to_local(lon, lat)
-px, py, _ = I.px(x, y, float(sys.argv[7]) if len(sys.argv) > 7 else 25)
+x, y = geo.convert_lonlat_to_local_meters(lon, lat)
+px, py, _ = I.project_to_pixels(x, y, float(sys.argv[7]) if len(sys.argv) > 7 else 25)
 x0, y0 = int(px - w / 2), int(py - h / 2)
 i0, j0, i1, j1 = x0 // T, y0 // T, (x0 + w) // T, (y0 + h) // T
 if out == '-': print(';'.join(f'{i}_{j}' for i in range(i0, i1 + 1) for j in range(j0, j1 + 1))); sys.exit()

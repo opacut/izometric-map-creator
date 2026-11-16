@@ -1,4 +1,6 @@
 """Doplnění chybějících časů mezizastávek GTFS mezi známými časy."""
+from collections import defaultdict
+from collections import deque
 
 def dopln_mezicasy(rows):
     """Seřazené (pořadí, příjezd, odjezd, vzdálenost, stop_id); bez extrapolace konců."""
@@ -24,7 +26,6 @@ def cekani_na_konecne(spoje, druh, okno=1800):
     Spoj [linka, tvar, služba, t0, ..., ..., zastávky [jméno, čas, ...]]: dojezd jiného spoje téže služby a druhu vozidla
     do zastávky stejného jména nejvýš okno sekund před odjezdem se spáruje s nejbližším odjezdem (nejstarší dojezd první).
     Vlaky (druh 2) nečekají. Vrací počet spárovaných spojů."""
-    from collections import defaultdict, deque
     doj, odj = defaultdict(list), defaultdict(list)
     for q in spoje:
         q.append(0)

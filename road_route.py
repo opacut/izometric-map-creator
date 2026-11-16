@@ -9,7 +9,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import shapely
 from shapely.ops import transform
-from geo import to_local
+import geo
 
 COST = {'motorway': 1.0, 'trunk': 1.0, 'primary': 1.0, 'secondary': 1.0, 'tertiary': 1.0,
         'unclassified': 1.2, 'residential': 1.2, 'living_street': 1.5, 'service': 2.0, 'unknown': 1.5}
@@ -23,7 +23,7 @@ class Graph:
         for r in t:
             c = COST.get(r['class'])
             if r['subtype'] != 'road' or c is None: continue
-            g = transform(lambda x, y, z=None: to_local(x, y), shapely.from_wkb(r['geometry'])).segmentize(20.0)
+            g = transform(lambda x, y, z=None: geo.convert_lonlat_to_local_meters(x, y), shapely.from_wkb(r['geometry'])).segmentize(20.0)
             for ls in getattr(g, 'geoms', [g]):
                 ids = [self.node(p) for p in ls.coords]
                 for a, b in zip(ids, ids[1:]):

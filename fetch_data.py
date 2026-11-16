@@ -1,101 +1,151 @@
 """Stáhne data pro výřez: Overture Maps (S3, anonymně) + terén Terrarium (AWS Open Data).
 
-python fetch_data.py --vse         # všechny čtverce z mesto.json + místa + městské části (první spuštění)
-python fetch_data.py --chunk -1,0  # čtverec mapy s rezervou 300 m -> data_c-1_0/ (čtverec 0,0 -> data/)
-python fetch_data.py --places      # názvy a firmy (Overture places) pro karty budov -> data/places.parquet
-python fetch_data.py --deleni      # městské části a osady (Overture divisions) -> data_all/division_area.parquet
+Může být spuštěno jako skript nebo importováno a voláno jako funkce.
 """
-import math, os, subprocess, sys, time, urllib.request
-import pyarrow.dataset as ds, pyarrow.parquet as pq
+import math
+import os
+from pathlib import Path
+import time
+import urllib.request
+import pyarrow.dataset
+import pyarrow.fs
+import pyarrow.parquet
+import pyarrow.compute
 import geo
-from nastroje import overture      # vydání Overture (když vyzkoušené z S3 zmizí, vezme se nejnovější)
-LAYERS = [('buildings', 'building'), ('transportation', 'segment'), ('base', 'land_use'), ('base', 'water'),
-          ('base', 'land_cover'), ('base', 'infrastructure'), ('base', 'land'), ('addresses', 'address')]
+from constants import HALF_SQUARE_SIDE
+from constants import MAP_CHUNKS
 
 
-def tile(lon, lat, z):
-    n = 2 ** z
-    return int((lon + 180) / 360 * n), int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)
+RELEASE = '2026-10-21.0'
+LAYERS = [
+    ('buildings', 'building'), 
+    ('transportation', 'segment'), 
+    ('base', 'land_use'), 
+    ('base', 'water'),
+    ('base', 'land_cover'), 
+    ('base', 'infrastructure'), 
+    ('base', 'land'), 
+    ('addresses', 'address')
+]
 
 
-def dem(D, X0, X1, Y0, Y1, z=14):
-    """terén Terrarium (AWS Open Data) pro výřez"""
-    os.makedirs(f'{D}/dem', exist_ok=True)
-    tx0, ty0 = tile(X0, Y1, z); tx1, ty1 = tile(X1, Y0, z)
+def build_bbox_filter(
+    min_lon: float, max_lon: float, min_lat: float, max_lat: float
+) -> pyarrow.compute.Expression:
+    """Create a PyArrow filter expression for bounding-box intersection."""
+    # Zde operátor & funguje, protože jde o Dataset Expressions
+    return (
+        (pyarrow.dataset.field("bbox", "xmin") < max_lon)
+        & (pyarrow.dataset.field("bbox", "xmax") > min_lon)
+        & (pyarrow.dataset.field("bbox", "ymin") < max_lat)
+        & (pyarrow.dataset.field("bbox", "ymax") > min_lat)
+    )
+
+def fetch_all() -> None:
+    """Downloads all layers for the whole map and cuts it into squares from MAP_CHUNKS."""
+    proxy = os.environ.get('HTTPS_PROXY')
+    s3 = pyarrow.fs.S3FileSystem(anonymous=True, region='us-west-2', **({'proxy_options': proxy} if proxy else {}))
+
+    all_dir = Path("data_all")
+    data_dir = Path("data")
+    dem_dir = data_dir / "dem"
+    all_dir.mkdir(parents=True, exist_ok=True)
+    dem_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Download main Overture layers (with 400m buffer)
+    buffered_bounds = geo.get_map_bounding_box_lonlat(400)
+    buffered_filter = build_bbox_filter(*buffered_bounds)
+    for theme, data_type in LAYERS:
+        out_path = all_dir / f'{data_type}.parquet'
+        if out_path.exists():
+            print(f"Skipping {theme}/{data_type} (already exists).")
+            continue
+
+        print(f"Fetching {theme}/{data_type}...")
+        start_time = time.perf_counter()
+
+        s3_uri = f"overturemaps-us-west-2/release/{RELEASE}/theme={theme}/type={data_type}/"
+        dataset = pyarrow.dataset.dataset(s3_uri, filesystem=s3, format="parquet")
+        table = dataset.to_table(filter=buffered_filter)
+        pyarrow.parquet.write_table(table, out_path)
+
+        elapsed = time.perf_counter() - start_time
+        print(f"Finished {data_type}: {table.num_rows:,} rows in {elapsed:.1f}s.")
+
+    # 2. Download Terrarium DEM elevation tiles for the full buffered extent
+    X0, X1, Y0, Y1 = buffered_bounds
+    zoom = 14
+    n = 2**zoom
+    tx0 = int((X0 + 180) / 360 * n)
+    tx1 = int((X1 + 180) / 360 * n)
+    ty0 = int((1 - math.asinh(math.tan(math.radians(Y1))) / math.pi) / 2 * n)
+    ty1 = int((1 - math.asinh(math.tan(math.radians(Y0))) / math.pi) / 2 * n)
+
     for x in range(tx0, tx1 + 1):
         for y in range(ty0, ty1 + 1):
-            if not os.path.exists(f'{D}/dem/{z}_{x}_{y}.png'):
-                urllib.request.urlretrieve(f'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png', f'{D}/dem/{z}_{x}_{y}.png')
+            tile = dem_dir / f"{zoom}_{x}_{y}.png"
+            if not tile.exists():
+                url = f"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{x}/{y}.png"
+                urllib.request.urlretrieve(url, tile)
 
-
-if sys.argv[1:2] == ['--vse']:
-    # Overture se prohledává po celém světě (pomalé), proto každou vrstvu jednou pro celou mapu a čtverce se z ní vyříznou lokálně
-    os.makedirs('data_all', exist_ok=True)
-    X0, X1, Y0, Y1 = geo.bbox_lonlat(400)
-    for theme, typ in LAYERS:
-        out = f'data_all/{typ}.parquet'
-        if os.path.exists(out): continue
-        t = time.time()
-        d = overture.dataset(theme, typ)
-        f = ((ds.field('bbox', 'xmin') < X1) & (ds.field('bbox', 'xmax') > X0) & (ds.field('bbox', 'ymin') < Y1) & (ds.field('bbox', 'ymax') > Y0))
-        tb = d.to_table(filter=f); pq.write_table(tb, out)
-        print(typ, tb.num_rows, f'{time.time() - t:.0f}s', flush=True)
-    for c in sorted(geo.CHUNKS):
-        D = 'data' if c == (0, 0) else f'data_c{c[0]}_{c[1]}'
-        os.makedirs(f'{D}/dem', exist_ok=True)
-        cx, cy = geo.chunk_center(c); r = geo.HALF + 300
-        (x0, x1), (y0, y1) = geo.to_lonlat([cx - r, cx + r], [cy - r, cy + r])
+    # 3. Slice downloaded layers per geo chunk
+    for c in sorted(MAP_CHUNKS):
+        print(f"geo chunk: {c}")
+        #cx, cy = geo.get_chunk_center(c)
+        cx = c[0] * 2 * HALF_SQUARE_SIDE
+        cy = c[1] * 2 * HALF_SQUARE_SIDE
+        r = HALF_SQUARE_SIDE + 300
+        (x0, x1), (y0, y1) = geo.convert_local_meters_to_lonlat([cx - r, cx + r], [cy - r, cy + r])
         x0, x1, y0, y1 = float(x0), float(x1), float(y0), float(y1)
-        for theme, typ in LAYERS:
-            tb = pq.read_table(f'data_all/{typ}.parquet')
-            b = tb.column('bbox').combine_chunks()
-            import pyarrow.compute as pc
-            m = pc.and_(pc.and_(pc.less(b.field('xmin'), x1), pc.greater(b.field('xmax'), x0)),
-                        pc.and_(pc.less(b.field('ymin'), y1), pc.greater(b.field('ymax'), y0)))
-            pq.write_table(tb.filter(m), f'{D}/{typ}.parquet')
-        dem(D, x0, x1, y0, y1)
-        print('čtverec', c, '->', D, flush=True)
-    if not os.path.exists('data/places.parquet'): subprocess.run([sys.executable, __file__, '--places'], check=True)
-    if not os.path.exists('data_all/division_area.parquet'): subprocess.run([sys.executable, __file__, '--deleni'], check=True)
-    sys.exit()
-if sys.argv[1:2] == ['--deleni']:
-    d = overture.dataset('divisions', 'division_area')
-    X0, X1, Y0, Y1 = geo.bbox_lonlat(0)
-    f = ((ds.field('bbox', 'xmin') < X1) & (ds.field('bbox', 'xmax') > X0)
-         & (ds.field('bbox', 'ymin') < Y1) & (ds.field('bbox', 'ymax') > Y0))
-    os.makedirs('data_all', exist_ok=True)
-    tb = d.to_table(filter=f)
-    pq.write_table(tb, 'data_all/division_area.parquet')
-    print('částí obcí', tb.num_rows)
-    sys.exit()
-if sys.argv[1:2] == ['--places']:
-    d = overture.dataset('places', 'place')
-    X0, X1, Y0, Y1 = geo.bbox_lonlat(0)             # celá mapa
-    f = ((ds.field('bbox', 'xmin') < X1) & (ds.field('bbox', 'xmax') > X0)
-         & (ds.field('bbox', 'ymin') < Y1) & (ds.field('bbox', 'ymax') > Y0))
-    os.makedirs('data', exist_ok=True)
-    tb = d.to_table(filter=f)
-    pq.write_table(tb, 'data/places.parquet')
-    print('míst', tb.num_rows)
-    sys.exit()
-OUT = sys.argv[1] if len(sys.argv) > 1 else 'data'
-if OUT != '--chunk':
-    X0, X1, Y0, Y1 = tuple(map(float, sys.argv[2].split(",")))   # vlastní výřez lon0,lon1,lat0,lat1
-else:
-    c = tuple(int(v) for v in sys.argv[2].split(','))
-    OUT = 'data' if c == (0, 0) else f'data_c{c[0]}_{c[1]}'
-    cx, cy = geo.chunk_center(c); r = geo.HALF + 300
-    (X0, X1), (Y0, Y1) = geo.to_lonlat([cx - r, cx + r], [cy - r, cy + r])
-os.makedirs(f'{OUT}/dem', exist_ok=True)
-for theme, typ in LAYERS:
-    t = time.time()
-    d = overture.dataset(theme, typ)
-    f = ((ds.field('bbox', 'xmin') < X1) & (ds.field('bbox', 'xmax') > X0)
-         & (ds.field('bbox', 'ymin') < Y1) & (ds.field('bbox', 'ymax') > Y0))
-    tb = d.to_table(filter=f)
-    pq.write_table(tb, f'{OUT}/{typ}.parquet')
-    print(typ, tb.num_rows, f'{time.time() - t:.0f}s')
 
+        # Každý čtverec má svůj vlastní adresář (např. data_c-1_0)
+        #chunk_data_dir = Path(geo.get_chunk_directory(c))
+        chunk_data_dir = Path('build' if tuple(c) == (0, 0) else f'build/c{c[0]}_{c[1]}')
+        chunk_data_dir.mkdir(parents=True, exist_ok=True)
+        dem_chunk_dir = chunk_data_dir / "dem"
+        dem_chunk_dir.mkdir(parents=True, exist_ok=True)
 
-dem(OUT, X0, X1, Y0, Y1)
-print('terén hotov')
+        for _, typ in LAYERS:
+            table = pyarrow.parquet.read_table(all_dir / f"{typ}.parquet")
+            box = table.column("bbox").combine_chunks()
+            mask = pyarrow.compute.and_(
+                pyarrow.compute.and_(
+                    pyarrow.compute.less(box.field("xmin"), x1),
+                    pyarrow.compute.greater(box.field("xmax"), x0)
+                ),
+                pyarrow.compute.and_(
+                    pyarrow.compute.less(box.field("ymin"), y1),
+                    pyarrow.compute.greater(box.field("ymax"), y0)
+                )
+            )
+            pyarrow.parquet.write_table(table.filter(mask), chunk_data_dir / f"{typ}.parquet")
+
+        # Stažení DEM pro tento konkrétní čtverec
+        for x in range(tx0, tx1 + 1):
+            for y in range(ty0, ty1 + 1):
+                tile = dem_chunk_dir / f"{zoom}_{x}_{y}.png"
+                if not tile.exists():
+                    url = f"https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{x}/{y}.png"
+                    urllib.request.urlretrieve(url, tile)
+
+        print("square", c, "->", chunk_data_dir, flush=True)
+
+    # 4. Optional extra layers (places / division_area)
+    bounds = geo.bbox.lonlat(0) if hasattr(geo, 'bbox') and hasattr(geo.bbox, 'lonlat') else buffered_bounds
+    bbox_filter = build_bbox_filter(*bounds)
+        
+    if not os.path.exists('data/places.parquet'):
+        s3_uri = f'overturemaps-us-west-2/release/{RELEASE}/theme=places/type=place/'
+        output_path = Path('data/places.parquet')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset = pyarrow.dataset.dataset(s3_uri, filesystem=s3, format='parquet')
+        places_table = dataset.to_table(filter=bbox_filter)
+        pyarrow.parquet.write_table(places_table, output_path)
+
+    if not os.path.exists('data_all/division_area.parquet'):
+        s3_uri = f'overturemaps-us-west-2/release/{RELEASE}/theme=divisions/type=division_area/'
+        output_path = Path('data_all/division_area.parquet')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset = pyarrow.dataset.dataset(s3_uri, filesystem=s3, format='parquet')
+        div_table = dataset.to_table(filter=bbox_filter)
+        pyarrow.parquet.write_table(div_table, output_path)

@@ -3,7 +3,12 @@
 python nastroje/scitani.py [xlsx nebo URL]
 Výsledky: https://www.rsd.cz/silnice-a-dalnice/scitani-dopravy (sloupec SV = všechna vozidla za 24 h, nak = nákladní)
 """
-import json, os, re, sys, urllib.request, zipfile
+import json
+import os
+import re
+import sys
+import urllib.request
+import zipfile
 from xml.etree import ElementTree as ET
 
 URL = 'https://www.rsd.cz/documents/38144/3734982/V2_CSD_2025_20260826.xlsx/5a2163ce-1bcc-6264-8251-98e4dd34a9ec?t=1788264442427'

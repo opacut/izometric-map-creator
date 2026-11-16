@@ -1,98 +1,126 @@
-"""Společné souřadnice a kamera (musí odpovídat render.html)."""
-import json, math, os
+"""Common coordinates and camera (must correspond to render.html)."""
+import math
 import numpy as np
 
-# Město: mesto.json (vyrobí ho novy_mesto.py), jiný soubor přes proměnnou IZO_MESTO
-MESTO = json.load(open(os.environ.get('IZO_MESTO', 'mesto.json'), encoding='utf-8'))
-# vánoční výzdoba na jednom místě (assets/vanoce.json): {"od": "11-11", "do": "01-06", "stromy": [[lat, lon]], "kluziste": [...], "stanky": [...]}
-# přepíše staré klíče vanocni_strom / kluziste / vanocni_stanky z mesto.json
-if os.path.exists('assets/vanoce.json'):
-    _V = json.load(open('assets/vanoce.json', encoding='utf-8'))
-    MESTO.update({'vanocni_strom': _V.get('stromy') or [], 'kluziste': _V.get('kluziste') or [], 'vanocni_stanky': _V.get('stanky') or [],
-                  'vanoce': {'od': _V.get('od', '11-11'), 'do': _V.get('do', '01-06')}})
-LON0, LAT0 = MESTO['stred']          # střed čtverce (0, 0)
-HALF = float(MESTO.get('polovina', 1150.0))   # půl strany čtverce v metrech
-HREF = float(MESTO['href'])          # nulová výška terénu (stejná pro všechny čtverce), m n. m.
-# Rozlišení dlaždic mapy (metry na pixel): "zakladni" 0,2 m, "detailni" 0,1 m (ostřejší detail při největším přiblížení,
-# web ~2,7× větší). Stejná tabulka je v render.mjs. Obrysy a animace prohlížeče jsou vždy v pixelech 0,2 m (MPP_OVERLAY).
-ROZLISENI = {'zakladni': 0.2, 'detailni': 0.1}
-if MESTO.get('rozliseni', 'zakladni') not in ROZLISENI:
-    raise SystemExit(f'mesto.json: "rozliseni" má být "zakladni" nebo "detailni", ne {MESTO["rozliseni"]!r}')
-MPP = ROZLISENI[MESTO.get('rozliseni', 'zakladni')]
-MPP_OVERLAY = 0.2
+from constants import CITY_CONFIG
+from constants import HALF_SQUARE_SIDE
+from constants import MAP_CHUNKS
+#from constants import CHUNK_MARGIN_METERS
 
-# Mapa je skládačka čtverců 2·HALF; i roste na východ, j na sever. Čtverec (0, 0) musí být v seznamu.
-CHUNKS = {tuple(c): 'hotovo' for c in MESTO['ctverce']}
-MARGIN = 80.5           # pás sousedních čtverců, který se kreslí i do tohoto (budovy a stromy přes šev, stíny); = 280 px textury
-SAT_OUTLINE = False     # True = purpurové ohraničení zón upřesněných ze satelitních snímků (kontrola)
-FLOOR = float(MESTO['dno'])   # spodek řezu zeminou pro všechny čtverce (pod nejnižším místem mapy)
+# City configuration: loaded from JSON file (default 'mesto.json', or override via IZO_MESTO environment variable)
+#CITY_CONFIG = json.load(open(os.environ.get('IZO_MESTO', 'mesto.json'), encoding='utf-8'))
+#_CENTER_LONGITUDE, _CENTER_LATITUDE = CITY_CONFIG['stred']          # Center of coordinate square (0, 0)
+# only in fetch_data.py
+#HALF_SQUARE_SIDE = float(CITY_CONFIG.get('polovina', 1150.0))   # Half-width of the square in meters
+# not used anywhere
+#REFERENCE_ELEVATION = float(CITY_CONFIG['href'])          # Zero terrain elevation reference (meters above sea level)
 
+# Map is a grid of square chunks (2 * HALF_SQUARE_SIDE); 'east_index' grows east, 'north_index' grows north. Chunk (0, 0) must be present.
+# refd in fetch_data.py and render_par.py
+#MAP_CHUNKS = {tuple(chunk_coord): 'hotovo' for chunk_coord in CITY_CONFIG['ctverce']}
+# only referenced from the outside
+# refd in prep.py and nastroje
+#CHUNK_MARGIN_METERS = 80.5           # Margin of adjacent chunks rendered inside this one (for cross-seam buildings, trees, shadows); equals 280 px texture
+# not used anywhere
+#SHOW_SAT_OUTLINE = False     # True = magenta borders for zones refined from satellite imagery (quality control)
+# only referenced from prep.py
+#TERRAIN_FLOOR_ELEVATION = float(CITY_CONFIG['dno'])   # Bottom of the soil cut for all chunks (below lowest map point)
 
-def chunk_center(c):
-    return c[0] * 2 * HALF, c[1] * 2 * HALF
+METERS_PER_DEGREE_LONGITUDE = math.cos(math.radians(CITY_CONFIG['stred'][1])) * 111320.0
+METERS_PER_DEGREE_LATITUDE = 110574.0
 
-
-def chunk_dir(c):
-    return 'build' if tuple(c) == (0, 0) else f'build/c{c[0]}_{c[1]}'
-
-
-def extent(margin=0.0):
-    """obdélník celé mapy v lokálních metrech: x0, y0, x1, y1"""
-    i = [c[0] for c in CHUNKS]; j = [c[1] for c in CHUNKS]
-    return (min(i) * 2 * HALF - HALF - margin, min(j) * 2 * HALF - HALF - margin,
-            max(i) * 2 * HALF + HALF + margin, max(j) * 2 * HALF + HALF + margin)
+_CAMERA_ELEVATION_ANGLE = math.asin(math.tan(math.atan(0.5)))   # 30° -> 2:1 dimetric projection
+_CAMERA_AZIMUTH_ANGLE = math.radians(225)                     # View from southwest
+_CAMERA_VECTOR_Z = np.array([math.sin(_CAMERA_AZIMUTH_ANGLE) * math.cos(_CAMERA_ELEVATION_ANGLE), math.sin(_CAMERA_ELEVATION_ANGLE), -math.cos(_CAMERA_AZIMUTH_ANGLE) * math.cos(_CAMERA_ELEVATION_ANGLE)])
+CAMERA_VECTOR_X = np.cross([0, 1, 0], _CAMERA_VECTOR_Z)
+CAMERA_VECTOR_X /= np.linalg.norm(CAMERA_VECTOR_X)
+CAMERA_VECTOR_Y = np.cross(_CAMERA_VECTOR_Z, CAMERA_VECTOR_X)
 
 
-def bbox_lonlat(margin=300.0):
-    """obdélník celé mapy ve stupních: lon0, lon1, lat0, lat1"""
-    x0, y0, x1, y1 = extent(margin)
-    (a, b), (c, d) = to_lonlat([x0, x1], [y0, y1])
-    return float(a), float(b), float(c), float(d)
+### SECTION: only refd from the outside
+#def get_chunk_center(chunk_coord):
+#    return chunk_coord[0] * 2 * HALF_SQUARE_SIDE, chunk_coord[1] * 2 * HALF_SQUARE_SIDE
+
+#def get_chunk_directory(chunk_coord):
+#    return 'build' if tuple(chunk_coord) == (0, 0) else f'build/c{chunk_coord[0]}_{chunk_coord[1]}'
+
+def get_map_bounding_box_lonlat(margin=300.0):
+    """Bounding box of the entire map in geographic coordinates: lon0, lon1, lat0, lat1"""
+    min_x, min_y, max_x, max_y = get_map_extent_local_meters(margin)
+    (lon_min, lon_max), (lat_min, lat_max) = convert_local_meters_to_lonlat([min_x, max_x], [min_y, max_y])
+    return float(lon_min), float(lon_max), float(lat_min), float(lat_max)
+
+def find_chunk_containing_point(local_x, local_y):
+    """Returns the chunk coordinate containing a point given in local chunk (0, 0) coordinates"""
+    return (
+        int(math.floor((local_x + HALF_SQUARE_SIDE) / (2 * HALF_SQUARE_SIDE))), 
+        int(math.floor((local_y + HALF_SQUARE_SIDE) / (2 * HALF_SQUARE_SIDE)))
+    )
+
+# only refd from prep.py
+# TODO: study this comprehension
+#def get_neighboring_chunks(chunk_coord):
+#    """Returns neighboring chunks (including diagonals) that exist in the map: [(delta_east, delta_north), ...]"""
+#    return [
+#        (delta_east, delta_north) 
+#        for delta_north in (1, 0, -1) 
+#        for delta_east in (-1, 0, 1) 
+#        if (delta_east or delta_north) and (chunk_coord[0] + delta_east, chunk_coord[1] + delta_north) in MAP_CHUNKS
+#    ]
+
+# only refd from prep.py
+#def get_missing_neighbor_edges(chunk_coord):
+#    """Edges lacking a neighboring chunk get a soil cut skirt"""
+#    return ''.join(
+#        edge_name for edge_name, (delta_east, delta_north) in (('n', (0, 1)), ('s', (0, -1)), ('w', (-1, 0)), ('e', (1, 0)))
+#        if (chunk_coord[0] + delta_east, chunk_coord[1] + delta_north) not in MAP_CHUNKS)
+
+def convert_lonlat_to_local_meters(longitude, latitude):
+    return (
+        (np.asarray(longitude) - CITY_CONFIG['stred'][0]) * METERS_PER_DEGREE_LONGITUDE, 
+        (np.asarray(latitude) - CITY_CONFIG['stred'][1]) * METERS_PER_DEGREE_LATITUDE
+    )
 
 
-def chunk_of(x, y):
-    """čtverec, do kterého patří bod v souřadnicích čtverce (0, 0)"""
-    return int(math.floor((x + HALF) / (2 * HALF))), int(math.floor((y + HALF) / (2 * HALF)))
+### SECTION: refd both internally and externally
+def get_map_extent_local_meters(margin=0.0):
+    """Bounding rectangle of the entire map in local meters: min_x, min_y, max_x, max_y"""
+    east_indices = [chunk_coord[0] for chunk_coord in MAP_CHUNKS]
+    north_indices = [chunk_coord[1] for chunk_coord in MAP_CHUNKS]
+    return (
+        min(east_indices) * 2 * HALF_SQUARE_SIDE - HALF_SQUARE_SIDE - margin, 
+        min(north_indices) * 2 * HALF_SQUARE_SIDE - HALF_SQUARE_SIDE - margin,
+        max(east_indices) * 2 * HALF_SQUARE_SIDE + HALF_SQUARE_SIDE + margin, 
+        max(north_indices) * 2 * HALF_SQUARE_SIDE + HALF_SQUARE_SIDE + margin)
 
+def convert_local_meters_to_lonlat(local_x, local_y):
+    return (
+        np.asarray(local_x) / METERS_PER_DEGREE_LONGITUDE + CITY_CONFIG['stred'][0], 
+        np.asarray(local_y) / METERS_PER_DEGREE_LATITUDE + CITY_CONFIG['stred'][1]
+    )
 
-def neighbours(c):
-    """sousedé (i úhlopříčně), kteří jsou v mapě: [(di, dj), ...]"""
-    return [(di, dj) for dj in (1, 0, -1) for di in (-1, 0, 1) if (di or dj) and (c[0] + di, c[1] + dj) in CHUNKS]
-
-
-def skirt_edges(c):
-    """okraje bez souseda dostanou řez zeminou"""
-    return ''.join(k for k, (di, dj) in (('n', (0, 1)), ('s', (0, -1)), ('w', (-1, 0)), ('e', (1, 0)))
-                   if (c[0] + di, c[1] + dj) not in CHUNKS)
-KX = math.cos(math.radians(LAT0)) * 111320.0
-KY = 110574.0
-
-EL = math.asin(math.tan(math.atan(0.5)))   # 30° -> dimetrie 2:1
-AZ = math.radians(225)                     # pohled od jihozápadu
-CAM_Z = np.array([math.sin(AZ) * math.cos(EL), math.sin(EL), -math.cos(AZ) * math.cos(EL)])
-CAM_X = np.cross([0, 1, 0], CAM_Z); CAM_X /= np.linalg.norm(CAM_X)
-CAM_Y = np.cross(CAM_Z, CAM_X)
-
-
-def to_local(lon, lat):
-    return (np.asarray(lon) - LON0) * KX, (np.asarray(lat) - LAT0) * KY
-
-
-def to_lonlat(x, y):
-    return np.asarray(x) / KX + LON0, np.asarray(y) / KY + LAT0
-
-
-def view(x, y, h):
-    """lokální (východ, sever, výška) -> souřadnice v rovině kamery + hloubka (menší = blíž)"""
-    p = np.stack([np.asarray(x, float), np.asarray(h, float), -np.asarray(y, float)], -1)
-    return p @ CAM_X, p @ CAM_Y, -(p @ CAM_Z)
+# only refd from build_html.py
+def project_to_camera_view(local_x, local_y, height):
+    """Local coordinates (east, north, height) -> camera plane coordinates + depth (smaller = closer)"""
+    position_vector = np.stack([np.asarray(local_x, float), np.asarray(height, float), -np.asarray(local_y, float)], -1)
+    return (
+        position_vector @ CAMERA_VECTOR_X,
+        position_vector @ CAMERA_VECTOR_Y,
+        -(position_vector @ _CAMERA_VECTOR_Z)
+    )
 
 
 class Image2D:
-    """převod lokálních souřadnic na pixely výsledného obrázku (z info.json rendereru)"""
-    def __init__(self, info):
-        self.x0, self.y1, self.mpp = info['x0'], info['y1'], info['mpp']
+    """Converts local coordinates to output image pixels (using renderer's info.json)"""
+    def __init__(self, renderer_info):
+        self.min_x = renderer_info['x0']
+        self.max_y = renderer_info['y1']
+        self.meters_per_pixel = renderer_info['mpp']
 
-    def px(self, x, y, h):
-        vx, vy, d = view(x, y, h)
-        return (vx - self.x0) / self.mpp, (self.y1 - vy) / self.mpp, d
+    def project_to_pixels(self, local_x, local_y, height):
+        view_x, view_y, depth = project_to_camera_view(local_x, local_y, height)
+        return (
+            (view_x - self.min_x) / self.meters_per_pixel,
+            (self.max_y - view_y) / self.meters_per_pixel,
+            depth
+        )

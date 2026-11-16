@@ -1,13 +1,21 @@
 # plochy ZABAGED (ČÚZK, CC BY 4.0) pro celou mapu: orná půda, trvalý travní porost, sad/zahrada -> assets/zabaged.json
 # spouštět z kořene repa: python nastroje/zabaged.py   (polygony jako [[lat, lon], ...], první kruh vnější, další díry)
-import sys, os, json, re, urllib.parse, subprocess; sys.path.insert(0, '.')
+import sys
+import os
+import json
+import re
+import urllib.parse
+import subprocess
+# TODO: wtf is this
+sys.path.insert(0, '.')
 import geo
 import shapely
 from pyproj import Transformer
+
 LAYERS = {'orna': 'Orná_půda_a_ostatní_dále_nespecifikované_plochy', 'ttp': 'Trvalý_travní_porost', 'sad': 'Ovocný_sad__zahrada'}
 URL = 'https://ags.cuzk.gov.cz/arcgis/services/ZABAGED_POLOHOPIS/MapServer/WFSServer?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature'
 T = Transformer.from_crs(4326, 5514, always_xy=True); B = Transformer.from_crs(5514, 4326, always_xy=True)
-_a, _b, _c, _d = geo.bbox_lonlat(100); xs, ys = T.transform([_a, _b, _a, _b], [_c, _c, _d, _d])
+_a, _b, _c, _d = geo.get_map_bounding_box_lonlat(100); xs, ys = T.transform([_a, _b, _a, _b], [_c, _c, _d, _d])
 X0, Y0, X1, Y1 = min(xs), min(ys), max(xs), max(ys)
 D = 'build/zabaged/'; os.makedirs(D, exist_ok=True); os.makedirs('assets', exist_ok=True)
 out = {}

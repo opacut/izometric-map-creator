@@ -1,12 +1,19 @@
 # Vybere z celostátního jízdního řádu (CZPTT XML, portal.cisjr.cz, soubor JR*.zip do build/vlaky/) osobní vlaky přes oblast mapy -> build/vlaky/vlaky.json
 # Každý vlak: číslo, druh, dopravce, kalendář (bitmapa dnů), všechny body trasy s časy. Přidané změny během roku (PA_*.xml v měsíčních složkách) zatím nezapočítává.
-import glob, json, re, zipfile, collections, sys
+import glob
+import json
+import re
+import zipfile
+import collections
+import sys
+# TODO: removee this wtf
 sys.path.insert(0, '.')
-from geo import MESTO
+from constants import CITY_CONFIG
+
 import xml.etree.ElementTree as ET
 
 Z = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob('build/vlaky/JR*.zip'))[-1]
-STANICE = MESTO.get('vlaky_stanice') or [MESTO['nazev']]   # části názvů stanic na mapě, např. ["Olomouc", "Velká Bystřice"]
+STANICE = CITY_CONFIG.get('vlaky_stanice') or [CITY_CONFIG['nazev']]   # části názvů stanic na mapě, např. ["Olomouc", "Velká Bystřice"]
 HLEDAT = re.compile('|'.join(map(re.escape, STANICE)).encode())
 JMENO = re.compile('|'.join(map(re.escape, STANICE)))
 

@@ -1,13 +1,25 @@
 # barvy střech z ortofota ČÚZK (CC BY 4.0): stáhne snímky po 0,4 m/px a pro každou budovu spočítá barvu střechy
 # -> build/orto04/ (dlaždice), assets/strechy_orto.json (id budovy -> [r, g, b]); prep.py ji použije místo náhodné barvy
 # spouštět z kořene repa: python nastroje/strechy.py   (stahuje se jednou, po přerušení pokračuje)
-import glob, json, os, subprocess, sys; sys.path.insert(0, '.')
-import numpy as np, geo, pyarrow.parquet as pq, shapely
-from PIL import Image, ImageDraw
+import glob
+import json
+import os
+import subprocess
+import sys
+# TODO: again, this is weird
+sys.path.insert(0, '.')
+import numpy as np
+import geo
+import pyarrow.parquet as pq
+import shapely
+from PIL import Image
+from PIL import ImageDraw
+from constants import CHUNK_MARGIN_METERS
+
 Image.MAX_IMAGE_PIXELS = None
 D = 'build/orto04/'; os.makedirs(D, exist_ok=True)
 M, T = 0.4, 1500
-X0, Y0, X1, Y1 = geo.extent(geo.MARGIN + 20)
+X0, Y0, X1, Y1 = geo.get_map_extent_local_meters(CHUNK_MARGIN_METERS + 20)
 W, H = int((X1 - X0) / M), int((Y1 - Y0) / M)
 
 
@@ -18,7 +30,7 @@ def tile(tx, ty):
             return np.asarray(Image.open(f).convert('RGB'))
         except OSError:
             w, h = min(T, W - tx), min(T, H - ty)
-            lo0, la1 = geo.to_lonlat(X0 + tx * M, Y1 - ty * M); lo1, la0 = geo.to_lonlat(X0 + (tx + w) * M, Y1 - (ty + h) * M)
+            lo0, la1 = geo.convert_local_meters_to_lonlat(X0 + tx * M, Y1 - ty * M); lo1, la0 = geo.convert_local_meters_to_lonlat(X0 + (tx + w) * M, Y1 - (ty + h) * M)
             subprocess.run(['curl', '-s', '-m', '120', '-o', f, 'https://ags.cuzk.gov.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer?SERVICE=WMS&VERSION=1.3.0'
                             f'&REQUEST=GetMap&LAYERS=0&STYLES=&CRS=EPSG:4326&BBOX={la0},{lo0},{la1},{lo1}&WIDTH={w}&HEIGHT={h}&FORMAT=image/jpeg'])
     return None
@@ -86,7 +98,7 @@ if __name__ == '__main__':
             if r['id'] in seen: continue
             seen.add(r['id'])
             g = shapely.from_wkb(r['geometry'])
-            xy = [geo.to_local(lo, la) for lo, la in (g.exterior.coords if g.geom_type == 'Polygon' else max(g.geoms, key=lambda q: q.area).exterior.coords)]
+            xy = [geo.convert_lonlat_to_local_meters(lo, la) for lo, la in (g.exterior.coords if g.geom_type == 'Polygon' else max(g.geoms, key=lambda q: q.area).exterior.coords)]
             p = shapely.Polygon(xy).buffer(-0.8)
             if p.is_empty or p.area < 8: continue
             if p.geom_type != 'Polygon': p = max(p.geoms, key=lambda q: q.area)
