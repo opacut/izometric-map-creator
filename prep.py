@@ -23,10 +23,13 @@ from shapely.geometry import Polygon
 from shapely.geometry import box
 from shapely.ops import transform
 from constants import CHUNK_MARGIN_METERS
+from constants import CORE_TEX_WIDTH
 from constants import CROP_TYPES
 from constants import CZECH_BUILDING_LABELS
 from constants import DEFAULT_TRAFFIC_BY_CLASS
 from constants import DRIVABLE_CLASSES
+from constants import EXTENDED_HALF
+from constants import EXT_TEX_WIDTH
 from constants import TERRAIN_FLOOR_ELEVATION
 from constants import FLAT_CLASSES
 from constants import FLAT_ROOF_PALETTE
@@ -36,6 +39,7 @@ from constants import LAND_USE_MAP
 from constants import LAND_USE_TREE_SPACING
 from constants import LINEAR_CLASS_MAP
 from constants import MAP_CHUNKS
+from constants import MARGIN_PX
 from constants import MAX_BRIDGE_GRADE
 from constants import MIN_BRIDGE_LEN
 from constants import MIN_TUNNEL_LEN
@@ -58,6 +62,7 @@ from constants import TENEMENT_WALL_PALETTE
 from constants import TERRAIN_GRID_NODES
 from constants import TERRAIN_GRID_STEP
 from constants import TERRAIN_MARGIN_STEPS
+from constants import TEX_METERS_PER_PX
 
 import geo
 
@@ -138,7 +143,11 @@ def load_spatial_parquet(data_dir, layer_name):
 # These poor methods have been living in prepare_scene() under squallid conditions.
 # We have brought them here where it's warm and they can redefine themselves
 
-# empty for now but plenty more to come, I expect
+def to_tex_coords(coords):
+    return [((x + EXTENDED_HALF) / TEX_METERS_PER_PX, (EXTENDED_HALF - y) / TEX_METERS_PER_PX) for x, y in coords]
+
+def to_tex_pixel(x, y):
+    return int((x + EXTENDED_HALF) / TEX_METERS_PER_PX), int((EXTENDED_HALF - y) / TEX_METERS_PER_PX)
 
 # ==========================================
 # MAIN PREPARATION PIPELINE
@@ -160,7 +169,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     os.makedirs(out_dir, exist_ok=True)
 
     # Spatial bounds & margin definitions
-    tex_meters_per_px = 2 * HALF_SQUARE_SIDE / 8000  # Max GPU texture size is 8192 px
     chunk_box = box(-HALF_SQUARE_SIDE, -HALF_SQUARE_SIDE, HALF_SQUARE_SIDE, HALF_SQUARE_SIDE)
     # Returns neighboring chunks (including diagonals) that exist in the map: [(delta_east, delta_north), ...]
     neighbor_offsets = [
@@ -169,8 +177,6 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         for delta_east in (-1, 0, 1) 
         if (delta_east or delta_north) and (chunk[0] + delta_east, chunk[1] + delta_north) in MAP_CHUNKS
     ]
-    extended_half = HALF_SQUARE_SIDE + CHUNK_MARGIN_METERS
-    margin_px = round(CHUNK_MARGIN_METERS / tex_meters_per_px)
     chunk_size = 2 * HALF_SQUARE_SIDE
 
     neighbor_boxes = [
@@ -178,7 +184,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         for dx, dy in neighbor_offsets
     ]
     map_clip_area = shapely.unary_union([chunk_box] + neighbor_boxes)
-    extended_area = map_clip_area.intersection(box(-extended_half, -extended_half, extended_half, extended_half))
+    extended_area = map_clip_area.intersection(box(-EXTENDED_HALF, -EXTENDED_HALF, EXTENDED_HALF, EXTENDED_HALF))
     extended_area_prep = shapely.prepared.prep(extended_area)
 
     # SECTION: Set Up Asset Paths
@@ -273,23 +279,15 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Surface Class Rasterization ----------------
     print("Surface Class Rasterization")
-    core_tex_width = int(2 * HALF_SQUARE_SIDE / tex_meters_per_px)
-    ext_tex_width = core_tex_width + 2 * margin_px
 
-    surface_img = Image.new('L', (ext_tex_width, ext_tex_width), SURFACE_IDS['grass'])
+    surface_img = Image.new('L', (EXT_TEX_WIDTH, EXT_TEX_WIDTH), SURFACE_IDS['grass'])
     surface_draw = ImageDraw.Draw(surface_img)
-    tree_block_img = Image.new('L', (ext_tex_width, ext_tex_width), 0)
+    tree_block_img = Image.new('L', (EXT_TEX_WIDTH, EXT_TEX_WIDTH), 0)
     tree_block_draw = ImageDraw.Draw(tree_block_img)
-    draw_bounds = box(-extended_half, -extended_half, extended_half, extended_half).buffer(50)
-
-    def to_tex_coords(coords):
-        return [((x + extended_half) / tex_meters_per_px, (extended_half - y) / tex_meters_per_px) for x, y in coords]
-
-    def to_tex_pixel(x, y):
-        return int((x + extended_half) / tex_meters_per_px), int((extended_half - y) / tex_meters_per_px)
+    draw_bounds = box(-EXTENDED_HALF, -EXTENDED_HALF, EXTENDED_HALF, EXTENDED_HALF).buffer(50)
 
     def paint_polygon(geometry, class_id, outline_id=None, block_trees=False):
-        for poly in extract_polygons(geometry.intersection(draw_bounds)):
+        for poly in extract_polygons(geometry.intersection(box(-EXTENDED_HALF, -EXTENDED_HALF, EXTENDED_HALF, EXTENDED_HALF).buffer(50))):
             surface_draw.polygon(to_tex_coords(poly.exterior.coords), fill=class_id, outline=outline_id)
             for hole in poly.interiors:
                 surface_draw.polygon(to_tex_coords(hole.coords), fill=SURFACE_IDS['grass'])
@@ -299,10 +297,10 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     def paint_line(geometry, class_id, width_m, block_trees=False):
         for line in extract_linestrings(geometry.intersection(draw_bounds)):
             pts = to_tex_coords(line.coords)
-            px_width = max(1, round(width_m / tex_meters_per_px))
+            px_width = max(1, round(width_m / TEX_METERS_PER_PX))
             surface_draw.line(pts, fill=class_id, width=px_width, joint='curve')
             if block_trees:
-                block_px_width = max(1, round((width_m + 2) / tex_meters_per_px))
+                block_px_width = max(1, round((width_m + 2) / TEX_METERS_PER_PX))
                 tree_block_draw.line(pts, fill=255, width=block_px_width, joint='curve')
 
     # ---------------- Load Spatial Layers ----------------
@@ -354,7 +352,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     if os.path.exists('build/zelen_maska.png'):
         green_arr = np.asarray(Image.open('build/zelen_maska.png')) > 0
         origin_x, origin_y, res = json.load(open('build/zelen_maska.json'))['x0y1m']
-        pixel_centers = (np.arange(ext_tex_width) + 0.5) * tex_meters_per_px - extended_half
+        pixel_centers = (np.arange(EXT_TEX_WIDTH) + 0.5) * TEX_METERS_PER_PX - EXTENDED_HALF
         cols = np.clip(((pixel_centers + center_x - origin_x) / res).astype(int), 0, green_arr.shape[1] - 1)
         rows = np.clip(((origin_y - (-pixel_centers + center_y)) / res).astype(int), 0, green_arr.shape[0] - 1)
 
@@ -442,12 +440,12 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         Image.MAX_IMAGE_PIXELS = None
         mask_x0, mask_y1, mask_res = json.load(open('build/les_maska.json'))['x0y1m']
         crop_box = (
-            round((center_x - extended_half - mask_x0) / mask_res),
-            round((mask_y1 - center_y - extended_half) / mask_res),
-            round((center_x + extended_half - mask_x0) / mask_res),
-            round((mask_y1 - center_y + extended_half) / mask_res),
+            round((center_x - EXTENDED_HALF - mask_x0) / mask_res),
+            round((mask_y1 - center_y - EXTENDED_HALF) / mask_res),
+            round((center_x + EXTENDED_HALF - mask_x0) / mask_res),
+            round((mask_y1 - center_y + EXTENDED_HALF) / mask_res),
         )
-        cropped_forest = Image.open('build/les_maska.png').crop(crop_box).resize((ext_tex_width, ext_tex_width), Image.NEAREST)
+        cropped_forest = Image.open('build/les_maska.png').crop(crop_box).resize((EXT_TEX_WIDTH, EXT_TEX_WIDTH), Image.NEAREST)
         forest_mask = np.asarray(cropped_forest) > 0
         non_forest_mask = ((np.asarray(surface_img) == SURFACE_IDS['forest']) & ~forest_mask).astype(np.uint8) * 255
         surface_img.paste(SURFACE_IDS['meadow'], mask=Image.fromarray(non_forest_mask))
@@ -466,7 +464,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         if os.path.exists('assets/zabaged.json')
         else {'orna': [], 'ttp': [], 'sad': []}
     )
-    ext_clip_box = box(-extended_half, -extended_half, extended_half, extended_half)
+    ext_clip_box = box(-EXTENDED_HALF, -EXTENDED_HALF, EXTENDED_HALF, EXTENDED_HALF)
     arable_overrides = set(zabaged_data.get('pole', []))
 
     meadow_polys = [
@@ -963,7 +961,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 heading = math.atan2(pt_next.y - pt_prev.y, pt_next.x - pt_prev.x)
                 mh_x = pt.x + math.cos(heading - math.pi / 2) * width / 4
                 mh_y = pt.y + math.sin(heading - math.pi / 2) * width / 4
-                radius_px = 0.38 / tex_meters_per_px
+                radius_px = 0.38 / TEX_METERS_PER_PX
                 tex_cx, tex_cy = to_tex_coords([(mh_x, mh_y)])[0]
                 surface_draw.ellipse(
                     [tex_cx - radius_px, tex_cy - radius_px, tex_cx + radius_px, tex_cy + radius_px],
@@ -989,7 +987,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             surface_draw.line(
                 to_tex_coords(yield_pts),
                 fill=SURFACE_IDS['marking'],
-                width=max(1, round(0.45 / tex_meters_per_px)),
+                width=max(1, round(0.45 / TEX_METERS_PER_PX)),
             )
 
     non_rail_lines = [
@@ -1301,7 +1299,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         address_labels = []
 
     scene_buildings, building_metadata, residential_chimneys = [], [], []
-    building_mask_img = Image.new('L', (ext_tex_width, ext_tex_width), 0)
+    building_mask_img = Image.new('L', (EXT_TEX_WIDTH, EXT_TEX_WIDTH), 0)
     building_mask_draw = ImageDraw.Draw(building_mask_img)
 
     landmarks = [
@@ -2187,8 +2185,8 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             px, py = to_tex_pixel(lamp_x, lamp_y)
             is_valid_spot = (
                 chunk_box.contains(Point(lamp_x, lamp_y))
-                and 0 <= px < ext_tex_width
-                and 0 <= py < ext_tex_width
+                and 0 <= px < EXT_TEX_WIDTH
+                and 0 <= py < EXT_TEX_WIDTH
                 and bld_mask_arr[py, px] == 0
             )
             if is_valid_spot and lamp_tree is not None:
@@ -2280,12 +2278,12 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     def is_tree_spot_free(x, y):
         px, py = to_tex_pixel(x, y)
-        return 0 <= px < ext_tex_width and 0 <= py < ext_tex_width and tree_exclusion_mask[py, px] == 0
+        return 0 <= px < EXT_TEX_WIDTH and 0 <= py < EXT_TEX_WIDTH and tree_exclusion_mask[py, px] == 0
 
     def are_tree_spots_free_vec(xs, ys):
-        pxs = ((xs + extended_half) / tex_meters_per_px).astype(int)
-        pys = ((extended_half - ys) / tex_meters_per_px).astype(int)
-        in_bounds = (pxs >= 0) & (pxs < ext_tex_width) & (pys >= 0) & (pys < ext_tex_width)
+        pxs = ((xs + EXTENDED_HALF) / TEX_METERS_PER_PX).astype(int)
+        pys = ((EXTENDED_HALF - ys) / TEX_METERS_PER_PX).astype(int)
+        in_bounds = (pxs >= 0) & (pxs < EXT_TEX_WIDTH) & (pys >= 0) & (pys < EXT_TEX_WIDTH)
         valid = np.zeros(len(xs), bool)
         valid[in_bounds] = tree_exclusion_mask[pys[in_bounds], pxs[in_bounds]] == 0
         return valid
@@ -2351,7 +2349,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
         def passes_forest_mask(tree_tuple):
             px, py = to_tex_pixel(tree_tuple[0], tree_tuple[1])
-            if not (0 <= px < ext_tex_width and 0 <= py < ext_tex_width) or forest_mask[py, px]:
+            if not (0 <= px < EXT_TEX_WIDTH and 0 <= py < EXT_TEX_WIDTH) or forest_mask[py, px]:
                 return True
             t_key = world_coord_key(tree_tuple[0], tree_tuple[1], center_x, center_y)
             return hash_to_unit_float('z' + t_key) < 0.3 and orchard_and_garden_prep.contains(Point(tree_tuple[0], tree_tuple[1]))
@@ -2498,11 +2496,11 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             zone_polys = [Polygon(list(zip(*geo.convert_lonlat_to_local_meters(*np.array(z['ring']).T)))) for z in satellite_data['zones'] if bool(z.get('fine')) == is_fine]
             if zone_polys:
                 for merged_zp in extract_polygons(shapely.unary_union(zone_polys)):
-                    surface_draw.line(to_tex_coords(list(merged_zp.exterior.coords)), fill=zone_id, width=max(1, round(3.0 / tex_meters_per_px)))
+                    surface_draw.line(to_tex_coords(list(merged_zp.exterior.coords)), fill=zone_id, width=max(1, round(3.0 / TEX_METERS_PER_PX)))
 
-    core_surface_grid = np.asarray(surface_img)[margin_px:margin_px + core_tex_width, margin_px:margin_px + core_tex_width]
-    noise_primary = np.random.default_rng(1).random((core_tex_width, core_tex_width), dtype=np.float32)
-    noise_secondary = np.random.default_rng(2).random((core_tex_width, core_tex_width), dtype=np.float32)
+    core_surface_grid = np.asarray(surface_img)[MARGIN_PX:MARGIN_PX + CORE_TEX_WIDTH, MARGIN_PX:MARGIN_PX + CORE_TEX_WIDTH]
+    noise_primary = np.random.default_rng(1).random((CORE_TEX_WIDTH, CORE_TEX_WIDTH), dtype=np.float32)
+    noise_secondary = np.random.default_rng(2).random((CORE_TEX_WIDTH, CORE_TEX_WIDTH), dtype=np.float32)
 
     natural_surface_ids = [
         SURFACE_IDS[k] for k in (
