@@ -1,3 +1,16 @@
+"""
+This module contains all the constants. 
+Most of the lines in the other files were just defining and redefining
+an endless sea of preset values, so we're trying to concentrate them here. 
+
+This module is growing fast and will likely not stop growing any time soon.
+Consider grouping them. Maybe into "pure constants" and "calculated values"...
+
+Or consider making this a class, some kind of provider.
+
+For now, this module mostly serves as a decluttering buffer so we can 
+decouple the data from the application flow.
+"""
 import json
 import os
 import math
