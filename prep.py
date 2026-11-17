@@ -2,7 +2,6 @@
 
 Can be run as a script or imported and called as a function.
 """
-import glob
 import hashlib
 import json
 import math
@@ -13,16 +12,15 @@ import sys
 from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFilter
+from dem_sampler import DemSampler
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import shapely
 from shapely.geometry import LineString
-from shapely.geometry import MultiPolygon
 from shapely.geometry import Point
 from shapely.geometry import Polygon
 from shapely.geometry import box
-from numpy.lib.stride_tricks import sliding_window_view
 from shapely.ops import transform
 from constants import CHUNK_MARGIN_METERS
 from constants import CROP_TYPES
@@ -57,6 +55,9 @@ from constants import STANDARD_WALL_PALETTE
 from constants import SURFACE_IDS
 from constants import TENEMENT_ROOF_PALETTE
 from constants import TENEMENT_WALL_PALETTE
+from constants import TERRAIN_GRID_NODES
+from constants import TERRAIN_GRID_STEP
+from constants import TERRAIN_MARGIN_STEPS
 
 import geo
 
@@ -131,65 +132,13 @@ def load_spatial_parquet(data_dir, layer_name):
     )
     return df
 
-
 # ==========================================
-# TERRAIN & DEM SAMPLER
+# STRAGGLERS
 # ==========================================
+# These poor methods have been living in prepare_scene() under squallid conditions.
+# We have brought them here where it's warm and they can redefine themselves
 
-def build_dem_sampler(data_dir):
-    """Load Terrarium PNG tiles, remove SRTM seam pits, and return a bilinear elevation sampler."""
-    tile_arrays = {}
-    dem_files = glob.glob(f'{data_dir}/dem/*.png') or glob.glob('data/dem/*.png')
-    for filepath in dem_files:
-        _, tile_x_str, tile_y_str = os.path.basename(filepath)[:-4].split('_')
-        rgb = np.asarray(Image.open(filepath).convert('RGB')).astype(np.float64)
-        elevation_m = rgb[..., 0] * 256 + rgb[..., 1] + rgb[..., 2] / 256 - 32768
-        tile_arrays[(int(tile_x_str), int(tile_y_str))] = elevation_m
-
-    if not tile_arrays:
-        return lambda px, py: np.zeros_like(px)
-
-    sorted_xs = sorted({coord[0] for coord in tile_arrays})
-    sorted_ys = sorted({coord[1] for coord in tile_arrays})
-    mosaic = np.zeros((len(sorted_ys) * 256, len(sorted_xs) * 256))
-
-    for (tile_x, tile_y), tile_data in tile_arrays.items():
-        row_start = (tile_y - sorted_ys[0]) * 256
-        col_start = (tile_x - sorted_xs[0]) * 256
-        mosaic[row_start:row_start + 256, col_start:col_start + 256] = tile_data
-
-    # Fix narrow seam pits in Terrarium SRTM tiles using a 7x7 median filter
-    padded_mosaic = np.pad(mosaic, 3, mode='edge')
-    local_median = np.median(sliding_window_view(padded_mosaic, (7, 7)), axis=(2, 3))
-    seam_pits = mosaic < local_median - 12
-    mosaic = np.where(seam_pits, local_median, mosaic)
-    if seam_pits.any():
-        print('oprava terénu (pruhy ve zdrojových datech)', int(seam_pits.sum()), 'bodů')
-
-    zoom_tiles = 2 ** 14
-
-    def sample_elevation(local_x, local_y):
-        lon, lat = geo.convert_local_meters_to_lonlat(local_x, local_y)
-        grid_x = (lon + 180) / 360 * zoom_tiles * 256 - sorted_xs[0] * 256
-        grid_y = (1 - np.arcsinh(np.tan(np.radians(lat))) / math.pi) / 2 * zoom_tiles * 256 - sorted_ys[0] * 256
-
-        col0 = np.floor(grid_x - 0.5).astype(int)
-        row0 = np.floor(grid_y - 0.5).astype(int)
-        frac_x = grid_x - 0.5 - col0
-        frac_y = grid_y - 0.5 - row0
-
-        col0 = np.clip(col0, 0, mosaic.shape[1] - 2)
-        row0 = np.clip(row0, 0, mosaic.shape[0] - 2)
-
-        return (
-            mosaic[row0, col0] * (1 - frac_x) * (1 - frac_y)
-            + mosaic[row0, col0 + 1] * frac_x * (1 - frac_y)
-            + mosaic[row0 + 1, col0] * (1 - frac_x) * frac_y
-            + mosaic[row0 + 1, col0 + 1] * frac_x * frac_y
-        )
-
-    return sample_elevation
-
+# empty for now but plenty more to come, I expect
 
 # ==========================================
 # MAIN PREPARATION PIPELINE
@@ -302,6 +251,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     lidar_heights.update(manual_overrides.get('dmp', {}))
 
 
+    # TODO: this is running arbitrary code
     def run_custom_hook(phase):
         if custom_hook_code:
             local_scope = locals()
@@ -311,42 +261,14 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
     # ---------------- Terrain Grid ----------------
     print("Terrain Grid")
-    dem_sampler = build_dem_sampler(data_dir)
-    grid_step = 5.0
-    grid_nodes = int(2 * HALF_SQUARE_SIDE / grid_step) + 1
-    margin_steps = int(math.ceil(CHUNK_MARGIN_METERS / grid_step)) + 2
-    ext_grid_nodes = grid_nodes + 2 * margin_steps
-    ext_radius = HALF_SQUARE_SIDE + margin_steps * grid_step
 
-    grid_xs, grid_ys = np.meshgrid(
-        np.linspace(-ext_radius, ext_radius, ext_grid_nodes),
-        np.linspace(ext_radius, -ext_radius, ext_grid_nodes),
-    )
-    ext_heights = dem_sampler(grid_xs, grid_ys)
+    sampler = DemSampler(data_dir)
 
-    run_custom_hook('terrain')
-    ext_heights = sliding_window_view(np.pad(ext_heights, 1, mode='edge'), (3, 3)).mean(axis=(2, 3))
-    base_elevation = REFERENCE_ELEVATION
-    ext_heights = ext_heights - base_elevation
-    core_heights = ext_heights[margin_steps:margin_steps + grid_nodes, margin_steps:margin_steps + grid_nodes]
-
-    def get_ground_elevation(x, y):
-        fx = (np.asarray(x) + ext_radius) / grid_step
-        fy = (ext_radius - np.asarray(y)) / grid_step
-        col0 = np.clip(np.floor(fx).astype(int), 0, ext_grid_nodes - 2)
-        row0 = np.clip(np.floor(fy).astype(int), 0, ext_grid_nodes - 2)
-        tx = np.clip(fx - col0, 0, 1)
-        ty = np.clip(fy - row0, 0, 1)
-        return (
-            ext_heights[row0, col0] * (1 - tx) * (1 - ty)
-            + ext_heights[row0, col0 + 1] * tx * (1 - ty)
-            + ext_heights[row0 + 1, col0] * (1 - tx) * ty
-            + ext_heights[row0 + 1, col0 + 1] * tx * ty
-        )
-
-    print('terén', grid_nodes, 'x', grid_nodes, 'převýšení', round(float(core_heights.max()), 1), 'm')
-
-
+    # TODO: disabling this, that method needs a rewrite
+    #run_custom_hook('terrain')
+    sampler.recalculate_ext_heights()
+    core_heights = sampler.ext_heights[TERRAIN_MARGIN_STEPS:TERRAIN_MARGIN_STEPS + TERRAIN_GRID_NODES, TERRAIN_MARGIN_STEPS:TERRAIN_MARGIN_STEPS + TERRAIN_GRID_NODES]
+    print('terén', TERRAIN_GRID_NODES, 'x', TERRAIN_GRID_NODES, 'převýšení', round(float(core_heights.max()), 1), 'm')
 
 
     # ---------------- Surface Class Rasterization ----------------
@@ -866,7 +788,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             cum_dist = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(xy_pts, axis=0).T))])
             total_profile_len = cum_dist[-1]
 
-            ground_z = get_ground_elevation(xy_pts[:, 0], xy_pts[:, 1])
+            ground_z = sampler.get_ground_elevation(xy_pts[:, 0], xy_pts[:, 1])
             is_on_span = (cum_dist >= span_start_d - 0.01) & (cum_dist <= span_end_d + 0.01)
             required_z = ground_z + 0.15
 
@@ -932,7 +854,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         if b_line.intersects(draw_bounds):
             b_xy = np.array(b_line.coords)[:, :2]
             b_dist = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(b_xy, axis=0).T))])
-            b_ground_z = get_ground_elevation(b_xy[:, 0], b_xy[:, 1])
+            b_ground_z = sampler.get_ground_elevation(b_xy[:, 0], b_xy[:, 1])
             norm_t = b_dist / max(b_dist[-1], 0.1)
             b_z = b_ground_z + 0.35 + custom_bridge.get('h', 1.2) * np.sin(np.pi * norm_t)
             bridge_decks.append((
@@ -1693,7 +1615,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
 
         if lm_cfg and lm_cfg['spec'].get('zones'):
             all_coords = np.array([c for q in pieces for c in q.exterior.coords])
-            shared_lm_ground = float(get_ground_elevation(all_coords[:, 0], all_coords[:, 1]).mean())
+            shared_lm_ground = float(sampler.get_ground_elevation(all_coords[:, 0], all_coords[:, 1]).mean())
             landmark_ground_z[lm_cfg['name']] = shared_lm_ground
             pieces, zone_list = split_by_landmark_zones(pieces, lm_cfg['spec']['zones'])
 
@@ -1871,7 +1793,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 eave_height = float(lm_spec['h'])
 
             ext_xs, ext_ys = np.array(poly.exterior.coords).T
-            ground_zs = get_ground_elevation(ext_xs, ext_ys)
+            ground_zs = sampler.get_ground_elevation(ext_xs, ext_ys)
             base_z, ground_z = float(ground_zs.min()) - 0.6, float(ground_zs.mean())
 
             if bld_cls in ('garage', 'garages', 'carport', 'shed'):
@@ -2084,7 +2006,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         if not extended_area_prep.contains(Point(lx, ly)):
             continue
         is_in_core = chunk_box.contains(Point(lx, ly))
-        ground_z = float(get_ground_elevation(lx, ly))
+        ground_z = float(sampler.get_ground_elevation(lx, ly))
         bld_idx = len(scene_buildings)
         half_w = spec['towers'][0]['w'] / 2
         ring = [[round(lx - half_w, 2), round(ly - half_w, 2)], [round(lx + half_w, 2), round(ly - half_w, 2)],
@@ -2124,7 +2046,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         if not extended_area_prep.contains(Point(cx, cy)):
             continue
         is_in_core = chunk_box.contains(Point(cx, cy))
-        ground_z = float(get_ground_elevation(cx, cy))
+        ground_z = float(sampler.get_ground_elevation(cx, cy))
         chim_h = float(chim['h'])
         override = next((q for q in manual_overrides.get('kominy', []) if math.dist((cx, cy), geo.convert_lonlat_to_local_meters(q['lon'], q['lat'])) < 20), {})
         kind_code = {'vez': 'v', 'stozar': 'm', 'nadrz': 't', 'rozhledna': 'r'}.get(chim['k'], 'c')
@@ -2159,7 +2081,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 continue
             poly = shapely.geometry.polygon.orient(poly.simplify(0.3), 1.0)
             ext_xs, ext_ys = np.array(poly.exterior.coords).T
-            zs = get_ground_elevation(ext_xs, ext_ys)
+            zs = sampler.get_ground_elevation(ext_xs, ext_ys)
             is_in_core = chunk_box.contains(poly.centroid)
             bld_obj = {
                 'p': [[round(x, 2), round(y, 2)] for x, y in list(poly.exterior.coords)[:-1]],
@@ -2225,7 +2147,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         prop_cls = row['class']
         if pt.geom_type != 'Point' or not chunk_box.contains(pt):
             continue
-        ground_z = float(get_ground_elevation(pt.x, pt.y))
+        ground_z = float(sampler.get_ground_elevation(pt.x, pt.y))
         nearest_road = find_nearest_road_direction(pt, non_rail_tree, non_rail_lines, 15)
         yaw = nearest_road[0] if nearest_road else hash_to_unit_float(world_coord_key(pt.x, pt.y, center_x, center_y)) * 6.28
         if prop_cls == 'bench':
@@ -2273,7 +2195,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 nearest_idx = lamp_tree.nearest(Point(lamp_x, lamp_y))
                 is_valid_spot = existing_lamp_pts[nearest_idx].distance(Point(lamp_x, lamp_y)) > 18
             if is_valid_spot and not any(abs(lamp_x - s[0]) < 12 and abs(lamp_y - s[1]) < 12 for s in street_props['lamp'][-6:]):
-                street_props['lamp'].append([lamp_x, lamp_y, float(get_ground_elevation(lamp_x, lamp_y)), heading])
+                street_props['lamp'].append([lamp_x, lamp_y, float(sampler.get_ground_elevation(lamp_x, lamp_y)), heading])
             cursor += 34
             side = -side
 
@@ -2308,7 +2230,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             by = curb_pt.y + dy * (road_w / 2 + 2.4) + math.sin(heading) * lateral
             if chunk_box.contains(Point(bx, by)):
                 bin_color = (0, 0, 1, 2)[k % 4] if k else bin_rng.choice((0, 0, 3))
-                street_props['wheelie'].append([bx, by, float(get_ground_elevation(bx, by)), math.atan2(dy, dx), bin_color])
+                street_props['wheelie'].append([bx, by, float(sampler.get_ground_elevation(bx, by)), math.atan2(dy, dx), bin_color])
 
     # Linear Features (Fences, Hedges, Walls, Powerlines, Ski Lifts)
     linear_features = {'fence': [], 'hedge': [], 'wall': [], 'power': [], 'lift': []}
@@ -2320,13 +2242,13 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             dense_line = line.segmentize(4.0)
             xs, ys = np.array(dense_line.coords).T
             linear_features[target_key].append([
-                [round(x, 2), round(y, 2), round(float(z), 2)] for x, y, z in zip(xs, ys, get_ground_elevation(xs, ys))
+                [round(x, 2), round(y, 2), round(float(z), 2)] for x, y, z in zip(xs, ys, sampler.get_ground_elevation(xs, ys))
             ])
 
     for key in street_props:
         street_props[key] = [[round(val, 3) for val in item] for item in street_props[key]]
 
-    parked_cars = [[round(x, 2), round(y, 2), round(float(get_ground_elevation(x, y)), 2), round(a, 3), ci] for x, y, a, ci in parked_cars]
+    parked_cars = [[round(x, 2), round(y, 2), round(float(sampler.get_ground_elevation(x, y)), 2), round(a, 3), ci] for x, y, a, ci in parked_cars]
     parked_cars += [[round(x, 2), round(y, 2), round(z, 2), round(a, 3), ci] for x, y, z, a, ci in rooftop_cars if chunk_box.contains(Point(x, y))]
 
     parked_buses = []
@@ -2335,9 +2257,10 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         x2, y2 = geo.convert_lonlat_to_local_meters(end_ll[1], end_ll[0])
         bx, by = (x1 + x2) / 2, (y1 + y2) / 2
         if chunk_box.contains(Point(bx, by)):
-            parked_buses.append([round(bx, 2), round(by, 2), round(float(get_ground_elevation(bx, by)), 2), round(math.atan2(y2 - y1, x2 - x1), 3), bus_kind])
+            print("could have been here - missing comma")
+            parked_buses.append([round(bx, 2), round(by, 2), round(float(sampler.get_ground_elevation(bx, by)), 2), round(math.atan2(y2 - y1, x2 - x1), 3), bus_kind])
 
-    tunnel_portals = [[round(x, 2), round(y, 2), round(float(get_ground_elevation(x, y)), 2), round(a, 3)] for x, y, a in tunnel_portals if chunk_box.contains(Point(x, y))]
+    tunnel_portals = [[round(x, 2), round(y, 2), round(float(sampler.get_ground_elevation(x, y)), 2), round(a, 3)] for x, y, a in tunnel_portals if chunk_box.contains(Point(x, y))]
 
     if os.path.exists('assets/potrubi.json'):
         linear_features['pipe'] = []
@@ -2346,7 +2269,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 xy_pts = shapely.get_coordinates(shapely.segmentize(line, 10.0))
                 linear_features['pipe'].append([
                     [round(float(x), 2), round(float(y), 2), round(float(z), 2)]
-                    for (x, y), z in zip(xy_pts, get_ground_elevation(xy_pts[:, 0], xy_pts[:, 1]))
+                    for (x, y), z in zip(xy_pts, sampler.get_ground_elevation(xy_pts[:, 0], xy_pts[:, 1]))
                 ])
 
     print({k: len(v) for k, v in street_props.items()}, 'aut', len(parked_cars), {k: len(v) for k, v in linear_features.items()})
@@ -2485,7 +2408,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         deduplicated_trees = [t for t in deduplicated_trees if is_clear_of_roads(t)]
         print('stromů nad vozovkou odstraněno', count_before - len(deduplicated_trees))
 
-    tree_elevations = get_ground_elevation(np.array([t[0] for t in deduplicated_trees]), np.array([t[1] for t in deduplicated_trees]))
+    tree_elevations = sampler.get_ground_elevation(np.array([t[0] for t in deduplicated_trees]), np.array([t[1] for t in deduplicated_trees]))
     scene_trees = [
         [round(t[0], 2), round(t[1], 2), round(float(z), 2), round(t[2], 1), t[3], t[4]]
         for t, z in zip(deduplicated_trees, tree_elevations)
@@ -2547,7 +2470,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                                 surface_draw.polygon(to_tex_coords([tuple(pt) for pt in grave_corners]), fill=SURFACE_IDS['grave'])
                             headstone_pt = corners[0] + unit_u * (col_offset + 0.5) + unit_v * (row_offset + 1.9)
                             graves.append([
-                                round(float(headstone_pt[0]), 2), round(float(headstone_pt[1]), 2), round(float(get_ground_elevation(*headstone_pt)), 2),
+                                round(float(headstone_pt[0]), 2), round(float(headstone_pt[1]), 2), round(float(sampler.get_ground_elevation(*headstone_pt)), 2),
                                 round(grave_angle, 3), round(grave_rng.uniform(0.55, 1.15) if not is_jewish else grave_rng.uniform(0.5, 0.9), 2), grave_rng.randrange(4),
                             ])
                     col_offset += cem_cfg.get('dcol', 1.45)
@@ -2557,7 +2480,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         pt = row.geom
         if row['class'] == 'artwork' and pt.geom_type == 'Point' and chunk_box.contains(pt):
             if any(r2['class'] == 'cemetery' and r2.geom.buffer(3).contains(pt) for _, r2 in land_use_df.iterrows()):
-                statues.append([round(pt.x, 2), round(pt.y, 2), round(float(get_ground_elevation(pt.x, pt.y)), 2), 0.0])
+                statues.append([round(pt.x, 2), round(pt.y, 2), round(float(sampler.get_ground_elevation(pt.x, pt.y)), 2), 0.0])
 
     street_props['planter'] = street_props['slab'] = street_props['pavilion'] = street_props['shed'] = []
     street_props['grave'] = graves
@@ -2646,13 +2569,13 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         radius = float(herd_cfg.get('radius', 30.0))
         herd_pt = Point(hx, hy)
         if extended_area_prep.contains(herd_pt) or herd_pt.buffer(radius).intersects(extended_area):
-            hz = float(get_ground_elevation(hx, hy))
+            hz = float(sampler.get_ground_elevation(hx, hy))
             if not is_tree_spot_free(hx, hy):
                 candidates = [(hx + math.cos(a) * d, hy + math.sin(a) * d) for d in np.linspace(3, radius, 8) for a in np.linspace(0, math.tau, 12)]
                 clear_spots = [pt for pt in candidates if is_tree_spot_free(*pt)]
                 if clear_spots:
                     hx, hy = min(clear_spots, key=lambda pt: math.hypot(pt[0] - hx, pt[1] - hy))
-                    hz = float(get_ground_elevation(hx, hy))
+                    hz = float(sampler.get_ground_elevation(hx, hy))
             herds_output.append({
                 'typ': species, 'x': round(hx, 2), 'y': round(hy, 2), 'z': round(hz, 2),
                 'n': int(herd_cfg.get('pocet', herd_cfg.get('count', 8))),
@@ -2673,12 +2596,12 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         'chunk': chunk,
         'center': [center_x, center_y],
         'half': HALF_SQUARE_SIDE,
-        'step': grid_step,
-        'n': grid_nodes,
-        'hmin': base_elevation,
+        'step': TERRAIN_GRID_STEP,
+        'n': TERRAIN_GRID_NODES,
+        'hmin': REFERENCE_ELEVATION,
         'heights': [round(float(v), 2) for v in core_heights.ravel()],
-        'ms': margin_steps,
-        'hext': [round(float(v), 2) for v in ext_heights.ravel()],
+        'ms': TERRAIN_MARGIN_STEPS,
+        'hext': [round(float(v), 2) for v in sampler.ext_heights.ravel()],
         'nb': neighbor_offsets,
         'margin': CHUNK_MARGIN_METERS,
         'skirt': get_missing_neighbor_edges(chunk),
@@ -2718,7 +2641,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
             if merged.geom_type == 'LineString'
             else max(extract_linestrings(merged), key=lambda q: q.length).interpolate(0.5, normalized=True)
         )
-        street_labels_out.append({'name': name, 'x': round(mid_pt.x, 1), 'y': round(mid_pt.y, 1), 'z': round(float(get_ground_elevation(mid_pt.x, mid_pt.y)), 1)})
+        street_labels_out.append({'name': name, 'x': round(mid_pt.x, 1), 'y': round(mid_pt.y, 1), 'z': round(float(sampler.get_ground_elevation(mid_pt.x, mid_pt.y)), 1)})
 
     def is_empty_restriction(val):
         return val is None or (not isinstance(val, str) and hasattr(val, '__len__') and len(val) == 0)
@@ -2864,9 +2787,11 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
                 edge['x'] = 1
         return edge
 
+
+    # TODO: this comprehension is insane. Unwrap it.
     road_graph = [
         build_road_graph_edge(
-            [[round(x, 1), round(y, 1), round(float(z), 1)] for (x, y), z in zip(sub_l.coords, get_ground_elevation(*np.array(sub_l.coords).T))],
+            [[round(x, 1), round(y, 1), round(float(z), 1)] for (x, y), z in zip(sub_l.coords, sampler.get_ground_elevation(*np.array(sub_l.coords).T))],
             sub_l,
             r_cls,
             name,
@@ -2963,7 +2888,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
     def drape_line_to_ground(line):
         dense = line.segmentize(3.0)
         xs, ys = np.array(dense.coords).T
-        return [[round(x, 1), round(y, 1), round(float(z), 1)] for x, y, z in zip(xs, ys, get_ground_elevation(xs, ys))]
+        return [[round(x, 1), round(y, 1), round(float(z), 1)] for x, y, z in zip(xs, ys, sampler.get_ground_elevation(xs, ys))]
 
     water_metadata = {'ponds': [], 'streams': []}
     for _, row in water_df.iterrows():
@@ -3024,7 +2949,7 @@ def prepare_scene(data_dir='data', chunk_coord=(0, 0)):
         'decks': [{'p': serialize_deck_line(deck), 'w': deck[4]} for deck in bridge_decks if deck[5] != 'foot' and chunk_box.intersects(deck[0])],
         'lamps': street_props['lamp'],
         'ground_small': [
-            [round(float(get_ground_elevation(x, y)), 1) for x in np.linspace(-HALF_SQUARE_SIDE, HALF_SQUARE_SIDE, 81)]
+            [round(float(sampler.get_ground_elevation(x, y)), 1) for x in np.linspace(-HALF_SQUARE_SIDE, HALF_SQUARE_SIDE, 81)]
             for y in np.linspace(HALF_SQUARE_SIDE, -HALF_SQUARE_SIDE, 81)
         ],
     }

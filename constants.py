@@ -1,5 +1,6 @@
 import json
 import os
+import math
 
 # City config, and cached values
 CITY_FILE_NAME = 'mesto.json'
@@ -175,3 +176,11 @@ TENEMENT_WALL_PALETTE = [
     (204, 202, 196), (238, 214, 170), (220, 176, 146), (196, 208, 214), (230, 220, 210),
 ]
 TERRAIN_FLOOR_ELEVATION = float(CITY_CONFIG['dno'])   # Bottom of the soil cut for all chunks (below lowest map point)
+
+
+TERRAIN_GRID_STEP = 5.0
+TERRAIN_GRID_NODES = int(2 * HALF_SQUARE_SIDE / TERRAIN_GRID_STEP) + 1
+TERRAIN_MARGIN_STEPS = int(math.ceil(CHUNK_MARGIN_METERS / TERRAIN_GRID_STEP)) + 2
+TERRAIN_EXT_GRID_NODES = TERRAIN_GRID_NODES + 2 * TERRAIN_MARGIN_STEPS
+# TODO: what does this represent?
+TERRAIN_EXT_RADIUS = HALF_SQUARE_SIDE + TERRAIN_MARGIN_STEPS * TERRAIN_GRID_STEP
